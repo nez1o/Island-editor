@@ -1,5 +1,6 @@
 # Build SlumberToggle's romfs: the "Slumber settings" menu with ON/OFF switches, reachable from the
-# Island Designer app and from its own "Slumber" phone app.
+# Island Designer app and from its own phone app ("Gyroid's menu"; the module draws that app's own
+# screen and only falls back to this talk menu when it can't).
 #
 #   Message/TalkSys_<lang>.sarc.zs   SYS_PhoneApp.msbt + our menu/status texts
 #   Message/LayoutMsg_<lang>.sarc.zs MenuDevice.msbt: the phone app's name (label 0090)
@@ -56,7 +57,7 @@ def msg_page(p): return '%d' % (601 + p)
 def msg_on(i): return '%d' % (640 + i)    # status lines after a switch (up to 20 switches)
 def msg_off(i): return '%d' % (660 + i)
 # MenuDevice.msbt labels of the phone apps' names (the module points the app records at them).
-APP_NAMES = [('0090', 'Slumber'), ('0091', 'Island Editor')]
+APP_NAMES = [('0090', "Gyroid's menu"), ('0091', 'Island Editor')]
 
 # ---------------------------------------------------------------- messages
 def msbt_read(b):
@@ -345,9 +346,10 @@ def build_layout_messages(lang, base=None, out=None):
 #   - SelectLoop: P_Base_Book's colour pulse moved from orange to purple
 ICON_TEXTURE = 'DeviceIconBook^x'
 ICON_FRAME = 4.0
-TILE_COLOR = (150, 120, 215)     # P_Base_00 colour channels 4/5/6 at frame 4
-SEL_TILE_BLACK = (150, 120, 215)  # P_Base_Book material colours
-SEL_TILE_WHITE = (160, 130, 225)
+# Gyroid clay: a warm terracotta tile under the pixel-art gyroid (phone_icon.py).
+TILE_COLOR = (214, 150, 92)      # P_Base_00 colour channels 4/5/6 at frame 4
+SEL_TILE_BLACK = (214, 150, 92)  # P_Base_Book material colours
+SEL_TILE_WHITE = (226, 164, 106)
 # P_Book_00: SelectLoop bobs its Y between -67 and -58 (bottom anchor), so a 148x148 icon at 0.82
 # anchored bottom-centre sits centred, about as big as the highlighted static icon.
 SEL_ICON_SIZE, SEL_ICON_SCALE, SEL_ICON_ORIGIN = 148.0, 0.82, 0x08

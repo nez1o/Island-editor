@@ -1,4 +1,4 @@
-# The Slumber phone app icon: drawn here, encoded as ASTC 5x4 sRGB, and written over the pixels of
+# The "Gyroid's menu" phone app icon (formerly Slumber): drawn here, encoded as ASTC 5x4 sRGB, and written over the pixels of
 # DeviceIconBook^x (180x180) in LMenuDeviceBtn's texture archive. That texture is only shown by frame 4
 # of the button's "Type" animation, which no app uses any more (Critterpedia moved to frame 19), so the
 # module points the Slumber app at frame 4.
@@ -11,61 +11,58 @@ from PIL import Image, ImageDraw, ImageFilter
 
 BROWN = (76, 60, 51, 255)       # the outline/ink colour of the game's phone icons (#4C3C33)
 CREAM = (247, 243, 225, 255)    # #F7F3E1
-YELLOW = (247, 211, 92, 255)
-SOFT = (255, 238, 170, 255)
-PINK = (240, 150, 160, 255)
+
+# A pixel-art gyroid (the same sprite as the menu's header, source/program/gyroid_sprite.inc) with two
+# little music notes - gyroids make sounds. Pixels are drawn as sharp squares; the whole figure gets the
+# thick brown ink outline the game's phone icons have.
+NOTE = [
+    "...XXX",
+    "...XXX",
+    "...X..",
+    "...X..",
+    "...X..",
+    ".XXX..",
+    "XXXX..",
+    ".XX...",
+]
+
+def _sprite_layer(size, rows, colour_of, scale, ox, oy):
+    layer = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    for y, row in enumerate(rows):
+        for x, ch in enumerate(row):
+            c = colour_of(ch)
+            if c: d.rectangle([ox + x * scale, oy + y * scale, ox + (x + 1) * scale - 1, oy + (y + 1) * scale - 1], fill=c)
+    return layer
+
+def _inked(layer, ink):
+    """Layer with a solid brown outline of <ink> pixels around its opaque part."""
+    a = layer.getchannel('A').point(lambda v: 255 if v else 0)
+    grown = a.filter(ImageFilter.MaxFilter(ink * 2 + 1))
+    out = Image.new('RGBA', layer.size, (0, 0, 0, 0))
+    out.paste(BROWN, (0, 0), grown)
+    out.alpha_composite(layer)
+    return out
 
 def draw_icon(size=180):
-    s = 4                                    # supersample, then downscale for smooth edges
-    W = size * s
-    img = Image.new('RGBA', (W, W), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    def P(*xy): return [v * s for v in xy]
-    ink = 7 * s
-
-    # Cloud (bottom): overlapping puffs, brown outline drawn by a bigger brown silhouette underneath.
-    puffs = [(34, 128, 30), (66, 112, 34), (104, 108, 36), (140, 124, 28), (88, 140, 30), (52, 146, 22), (124, 146, 22)]
-    for cx, cy, r in puffs:
-        d.ellipse(P(cx - r, cy - r, cx + r, cy + r), fill=BROWN)
-    d.rectangle(P(30, 128, 150, 162), fill=BROWN)
-    for cx, cy, r in puffs:
-        rr = r - 7
-        d.ellipse(P(cx - rr, cy - rr, cx + rr, cy + rr), fill=CREAM)
-    d.rectangle(P(37, 128, 143, 155), fill=CREAM)
-
-    # Crescent moon resting on the cloud, with a sleeping face.
-    mx, my, mr = 74, 72, 44
-    moon = Image.new('L', (W, W), 0)
-    md = ImageDraw.Draw(moon)
-    md.ellipse(P(mx - mr, my - mr, mx + mr, my + mr), fill=255)
-    md.ellipse(P(mx - mr + 30, my - mr - 14, mx + mr + 26, my + mr - 18), fill=0)
-    outline = moon.filter(ImageFilter.MaxFilter(ink * 2 + 1))
-    img.paste(BROWN, (0, 0), outline)
-    img.paste(YELLOW, (0, 0), moon)
-    # closed eye and a little blush
-    d.arc(P(52, 70, 70, 84), start=20, end=160, fill=BROWN, width=5 * s)
-    d.ellipse(P(44, 86, 54, 94), fill=PINK)
-
-    # "Z z" floating up to the right.
-    def zed(x, y, h, w):
-        pts = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
-        d.line([tuple(v * s for v in p) for p in pts], fill=BROWN, width=8 * s, joint='curve')
-    zed(118, 20, 26, 26)
-    zed(146, 54, 16, 16)
-
-    # Two little stars.
-    def star(cx, cy, r):
-        import math
-        pts = []
-        for i in range(10):
-            a = -math.pi / 2 + i * math.pi / 5
-            rr = r if i % 2 == 0 else r * 0.45
-            pts.append(((cx + rr * math.cos(a)) * s, (cy + rr * math.sin(a)) * s))
-        d.polygon(pts, fill=SOFT, outline=BROWN, width=3 * s)
-    star(128, 84, 11)
-    star(26, 34, 9)
-
-    return img.resize((size, size), Image.LANCZOS)
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import gyroid_art
+    rows, pal = gyroid_art.read_inc(os.path.join(here, '..', 'source', 'program', 'gyroid_sprite.inc'))
+    keys = '123456789abcdef'
+    def gyroid_colour(ch):
+        return None if ch == '.' else tuple(pal[keys.index(ch)]) + (255,)
+    w, h = len(rows[0]), len(rows)
+    scale = min(132 // h, 124 // w)
+    gw, gh = w * scale, h * scale
+    gx, gy = (size - gw) // 2 - 14, size - gh - 18
+    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    img.alpha_composite(_inked(_sprite_layer(size, rows, gyroid_colour, scale, gx, gy), 5))
+    note = lambda ch: CREAM if ch == 'X' else None
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 5, 128, 22), 4))
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 4, 146, 70), 4))
+    return img
 
 # ---------------------------------------------------------------- ASTC 5x4 (sRGB) encoder / decoder
 
@@ -168,7 +165,7 @@ def decode_image(data, w, h):
 
 if __name__ == '__main__':
     import sys
-    out = sys.argv[1] if len(sys.argv) > 1 else 'slumber_icon.png'
+    out = sys.argv[1] if len(sys.argv) > 1 else 'gyroid_icon.png'
     icon = draw_icon()
     icon.save(out)
     data, bw, bh = encode_image(icon)

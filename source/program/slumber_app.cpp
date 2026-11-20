@@ -538,44 +538,18 @@ namespace sl::app {
         x -= U(18);
     }
 
-    /* A little gyroid for the header watermark, one char per pixel. */
-    static const char* const k_Gyroid[] = {
-        "......OOOO......",
-        "....OOhhhhOO....",
-        "...OhLLhhhhhO...",
-        "..OhLhhhhhhhdO..",
-        "..OhhEhhhhEhdO..",
-        "..OhhEhhhhEhdO..",
-        "..OhhhhhhhhhdO..",
-        "..OhhhhMMhhhdO..",
-        "...OhhhMMhhdO...",
-        "....OOhhhhOO....",
-        "...OcccccccsO...",
-        "..OccccccccssO..",
-        "OaOccccccccssOaO",
-        "..OccccccccssO..",
-        ".OcccccccccsssO.",
-        ".OOOOOOOOOOOOOO.",
-    };
-    constexpr int GyroidW = 16, GyroidH = 16;
+    /* The gyroid next to the watermark (tools/gyroid_art.py makes it from a picture). */
+#include "gyroid_sprite.inc"
 
     static void DrawGyroid(int x, int y, int px) {
         for (int r = 0; r < GyroidH; r++) {
             const char* line = k_Gyroid[r];
             for (int c = 0; line[c]; c++) {
-                Rgb col;
-                switch (line[c]) {
-                    case 'O': col = { 92, 58, 34 }; break;     /* outline */
-                    case 'h': col = { 214, 162, 98 }; break;   /* clay head */
-                    case 'L': col = { 240, 204, 148 }; break;  /* shine */
-                    case 'd': col = { 182, 130, 74 }; break;   /* head shade */
-                    case 'E': case 'M': col = { 58, 36, 22 }; break;   /* eyes, mouth */
-                    case 'c': col = { 196, 140, 80 }; break;   /* body */
-                    case 's': col = { 160, 110, 60 }; break;   /* body shade */
-                    case 'a': col = { 214, 162, 98 }; break;   /* arms */
-                    default: continue;
-                }
-                FillRect(x + c * px, y + r * px, px, px, col);
+                char ch = line[c];
+                int k = ch >= '1' && ch <= '9' ? ch - '1' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 9 : -1;
+                if (k < 0) continue;
+                const uint8_t* rgb = k_GyroidPalette[k];
+                FillRect(x + c * px, y + r * px, px, px, Rgb{ rgb[0], rgb[1], rgb[2] });
             }
         }
     }
@@ -600,7 +574,7 @@ namespace sl::app {
         s_ClipY0 = 0; s_ClipY1 = H;
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
-        int px = U(3) < 2 ? 2 : U(3);
+        int px = U(48) / GyroidH < 1 ? 1 : U(48) / GyroidH;   /* about 48 units tall, whole pixels */
         int gx = W - U(24) - GyroidW * px, gy = (hh + b - GyroidH * px) / 2;
         DrawGyroid(gx, gy, px);
         DrawText(s_F->small, gx - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
