@@ -1,4 +1,5 @@
 #include "lib.hpp"
+#include "slumber_app.hpp"
 #include "nn/fs.hpp"
 #include "nn/os.hpp"
 #include "lib/nx/arm/cache.h"
@@ -12,7 +13,6 @@ namespace nn::fs {
     Result DeleteFile(char const* path);
 }
 
-/* The game's own HID imports (exported by the SDK module). */
 /* SlumberToggle: runtime on/off switches for Slumber Island style features in ACNH 3.0.3.
    Loads as subsdk8 so it can sit next to Aden Modmenu (subsdk9).
 
@@ -1651,10 +1651,10 @@ namespace sl {
 
     /* ---- toggles.txt ---- */
 
-    static char s_LastToggles[2048];
+    static char s_LastToggles[4096];
 
     static void WriteDefaultToggles() {
-        char buf[2048];
+        char buf[4096];
         int len = snprintf(buf, sizeof(buf),
             "# SlumberToggle switches: 1 = on, 0 = off. Changes apply within a second.\n");
         for (size_t i = 0; i < FeatureCount; i++)
@@ -1662,6 +1662,8 @@ namespace sl {
                             g_Features[i].key, g_Features[i].wanted ? 1 : 0, g_Features[i].label);
         len += snprintf(buf + len, sizeof(buf) - len, "terraform_speed=%d    # animation speed while terraforming (1-60)\n",
                         (int)s_TerraformSpeed);
+        len += snprintf(buf + len, sizeof(buf) - len,
+                        "app_flip_y=%d    # Slumber app screen: -1 auto; 1 or 0 if it shows upside down\n", app::FlipOverride());
         if (!s_SdReady) return;
         nn::fs::DeleteFile(TogglesPath);
         nn::fs::CreateFile(TogglesPath, len);
@@ -1680,7 +1682,7 @@ namespace sl {
         if (R_FAILED(nn::fs::OpenFile(&h, TogglesPath, nn::fs::OpenMode_Read))) return false;
         long size = 0;
         nn::fs::GetFileSize(&size, h);
-        char buf[2048] = {};
+        char buf[4096] = {};
         if (size > (long)sizeof(buf) - 1) size = sizeof(buf) - 1;
         nn::fs::ReadFile(h, 0, buf, size);
         nn::fs::CloseFile(h);
@@ -1695,6 +1697,13 @@ namespace sl {
                 *eq = 0;
                 for (size_t i = 0; i < FeatureCount; i++)
                     if (strcmp(line, g_Features[i].key) == 0) g_Features[i].wanted = eq[1] == '1';
+                if (strcmp(line, "app_flip_y") == 0) {
+                    int flip = eq[1] == '-' ? -1 : eq[1] == '1' ? 1 : 0;
+                    if (flip != app::FlipOverride()) {
+                        app::SetFlipOverride(flip);
+                        Log("app_flip_y = %d", flip);
+                    }
+                }
                 if (strcmp(line, "terraform_speed") == 0) {
                     int v = 0;
                     for (const char* c = eq + 1; *c >= '0' && *c <= '9'; c++) v = v * 10 + (*c - '0');
@@ -1729,6 +1738,102 @@ namespace sl {
         WriteDefaultToggles();  /* saves the current choices */
     }
 
+    /* ---- The Slumber app screen's rows (slumber_app.cpp draws them) ----
+       One row per switch, plus the terraforming speed after "fast_terraform". The screen shows
+       and changes what is wanted; the switches are applied on the game thread (AppTick, like the
+       old talk menu did) and saved to toggles.txt by the watch thread (no SD writes in a frame). */
+
+    struct AppText { const char* key; const char* label; const char* help; };
+    static const AppText k_AppText[] = {
+        { "slumber_dpad", "Slumber catalog + time", "Slumber Island's catalog and its time / weather screen on the D-pad." },
+        { "instant_bridges", "Instant bridges & inclines", "Bridges and inclines are finished the moment you place them." },
+        { "trees_anywhere", "Trees anywhere", "Plant trees anywhere." },
+        { "outdoor_rugs", "Rugs outdoors", "Place rugs outdoors." },
+        { "outdoor_partition_walls", "Partition walls outdoors", "Place partition walls outdoors." },
+        { "level4_access", "Level-4 cliffs", "Reach level-4 cliffs." },
+        { "slumber_terraform", "Slumber terraforming", "Experimental: terraform with Slumber Island's rules on your island." },
+        { "terraform_near_trees", "Terraform near trees", "Experimental: build cliffs and water right next to trees and cliffs." },
+        { "slumber_weather", "Slumber weather", "Pick sunny or rain / snow for your island on the Slumber time screen." },
+        { "slumber_phone_app", "Slumber phone app", "This app. Off removes it from the phone; toggles.txt or Island Designer's Slumber settings bring it back." },
+        { "fast_terraform", "Faster terraforming", "Cliff and water building plays fast, at the speed set below." },
+        { "slumber_hud", "Slumber HUD + build modes", "Slumber's fence / helper / bag HUD on your island, + switches the build mode." },
+        { "island_editor", "Island editor app", "Happy Home Paradise's outdoor editor on your island: place items anywhere, move houses (needs HHP)." },
+        { "unlock_all", "Unlock everything", "All phone apps, construction permits and HHP unlocks." },
+        { "cliff_stack", "Stacked cliffs", "The cliff tool stacks a cliff on a flush edge, instantly, with solid walls." },
+    };
+    static const int k_SpeedSteps[] = { 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 60 };
+    constexpr int SpeedStepCount = sizeof(k_SpeedSteps) / sizeof(k_SpeedSteps[0]);
+
+    /* What InstallAppHooks found (logged at startup, once the SD card is up). */
+    bool g_AppNvnHook = false;
+    int  g_AppNpadHooks = 0;
+    bool g_AppAlloc = false;
+
+    static std::atomic<bool> s_AppApply{false};   /* switches changed: apply on the game thread */
+    static std::atomic<bool> s_AppSave{false};    /* save toggles.txt from the watch thread */
+
+    static int SpeedRow() {
+        for (size_t i = 0; i < FeatureCount; i++)
+            if (strcmp(g_Features[i].key, "fast_terraform") == 0) return (int)i + 1;
+        return (int)FeatureCount;
+    }
+
+    /* Row -> feature index, or -1 for the speed row. */
+    static int RowFeature(int row) {
+        int speed = SpeedRow();
+        return row == speed ? -1 : row < speed ? row : row - 1;
+    }
+
+    int AppRowCount() { return (int)FeatureCount + 1; }
+
+    void AppRowGet(int row, AppRow* out) {
+        int f = RowFeature(row);
+        if (f < 0) {
+            *out = { "Terraform speed", "How fast terraforming plays while Faster terraforming is on (1x to 60x).",
+                     true, false, (int)s_TerraformSpeed };
+            return;
+        }
+        if (f >= (int)FeatureCount) { *out = { "", "", false, false, 0 }; return; }
+        const Feature& feat = g_Features[f];
+        *out = { feat.key, feat.label, false, feat.wanted, 0 };
+        for (const AppText& t : k_AppText)
+            if (strcmp(t.key, feat.key) == 0) { out->label = t.label; out->help = t.help; }
+    }
+
+    void AppRowChange(int row, int dir) {
+        int f = RowFeature(row);
+        if (f < 0) {
+            int cur = (int)s_TerraformSpeed, next = cur;
+            if (dir >= 0) {
+                next = dir == 0 ? k_SpeedSteps[0] : k_SpeedSteps[SpeedStepCount - 1];
+                for (int v : k_SpeedSteps) if (v > cur) { next = v; break; }
+            } else {
+                next = k_SpeedSteps[0];
+                for (int v : k_SpeedSteps) if (v < cur) next = v;
+            }
+            if (next != cur) {
+                s_TerraformSpeed = (float)next;
+                s_AppSave = true;
+                Log("app: terraform_speed = %d", next);
+            }
+            return;
+        }
+        if (f >= (int)FeatureCount) return;
+        Feature& feat = g_Features[f];
+        bool want = dir == 0 ? !feat.wanted : dir > 0;
+        if (want == feat.wanted) return;
+        feat.wanted = want;
+        s_AppApply = true;
+        Log("app: %s -> %s", feat.key, want ? "ON" : "OFF");
+    }
+
+    /* Game thread, every frame. */
+    void AppTick() {
+        if (!s_AppApply.exchange(false)) return;
+        ApplyAll();
+        s_AppSave = true;
+    }
+
     /* ---- startup ---- */
 
     alignas(0x1000) static u8 s_ThreadStack[0x4000];
@@ -1738,6 +1843,7 @@ namespace sl {
         while (true) {
             nn::os::SleepThread(nn::TimeSpan::FromSeconds(1));
             FlushLog();
+            if (s_AppSave.exchange(false)) WriteDefaultToggles();   /* changes made in the Slumber app */
             if (ReadToggles()) ApplyAll();
             /* The real table is filled during boot; keep the terraforming copy in sync. */
             for (size_t i = 0; i < FeatureCount; i++)
@@ -1758,7 +1864,10 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.60 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.61 - main base %lx", exl::util::modules::GetTargetStart());
+
+        Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
+            g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
 
         PrepareTerraformWords();
 
@@ -1867,16 +1976,28 @@ HOOK_DEFINE_TRAMPOLINE(PhoneAppBadge) {
 /* Island Editor app handler (result: +0 next phone page, +4 flow kind, +8 "close the phone"). */
 static void EditorAppHandler(u8* result, u8*) { sl::EditorAppLaunched(result); }
 
+/* Slumber app handler: close the phone and open the app's own screen. */
+static void SlumberAppHandler(u8* result, u8*) {
+    result[8] = 1;
+    sl::app::Open();
+}
+
 /* Phone: "blr x8" calling handler[app id](result, player); the app id is at [x29 - 4].
-   For the Slumber app, call Island Designer's handler (start flow kind 2) instead. */
+   The Slumber app opens its own screen (slumber_app.cpp); if that can't be drawn, it calls
+   Island Designer's handler (start flow kind 2) for the old talk menu instead. */
 HOOK_DEFINE_INLINE(PhoneAppLaunch) {
     static void Callback(exl::hook::InlineCtx* ctx) {
         s32 app_id = *reinterpret_cast<s32*>(ctx->X[29] - 4);
         sl::g_LaunchSlumberApp = false;
         if (app_id == sl::SlumberAppId && sl::PhoneAppOn()) {
-            ctx->X[8] = exl::util::modules::GetTargetOffset(sl::PhoneAppHandler());
-            sl::g_LaunchSlumberApp = true;
-            sl::Log("phone: Slumber app opened");
+            if (sl::app::Ready()) {
+                ctx->X[8] = reinterpret_cast<u64>(&SlumberAppHandler);
+                sl::Log("phone: Slumber app opened");
+            } else {
+                ctx->X[8] = exl::util::modules::GetTargetOffset(sl::PhoneAppHandler());
+                sl::g_LaunchSlumberApp = true;
+                sl::Log("phone: Slumber app opened (talk menu)");
+            }
         }
         if (app_id == sl::EditorSlot() && sl::EditorAppOn())
             ctx->X[8] = reinterpret_cast<u64>(&EditorAppHandler);
@@ -2200,13 +2321,91 @@ HOOK_DEFINE_TRAMPOLINE(FrameTick) {
     static u64 Callback(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         u64 r = Orig(a0, a1, a2, a3, a4, a5, a6, a7);
         sl::BuildingTick();
+        sl::AppTick();
         return r;
     }
 };
 
+/* ---- Slumber app screen: NVN and controller hooks (see slumber_app.cpp) ---- */
+
+/* Address of a function the SDK module exports, or 0. */
+static uintptr_t SdkSymbol(const char* name) {
+    using exl::util::ModuleIndex;
+    if (!exl::util::HasModule(ModuleIndex::Sdk)) return 0;
+    const Elf_Sym* sym = exl::reloc::GetSymbol(ModuleIndex::Sdk, name);
+    if (!sym || !sym->st_value) return 0;
+    return exl::util::GetModuleInfo(ModuleIndex::Sdk).m_Total.m_Start + sym->st_value;
+}
+
+/* Every NVN function the game looks up passes through here. */
+HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
+    static sl::app::GenericFn Callback(const char* name) {
+        return sl::app::WrapProc(name, Orig(name));
+    }
+};
+
+/* nn::hid state reads, one hook per state type (NpadBaseState layout for all of them):
+   detail::GetNpadStates(int* written, State*, int count, const NpadIdType&) is what the
+   public GetNpadState(s) call; the public ones are hooked too in case some don't go through it. */
+#define NPAD_HOOKS(type)                                                                     \
+    HOOK_DEFINE_TRAMPOLINE(NpadDetail##type) {                                               \
+        static int Callback(int* written, void* states, int count, const u32& id) {          \
+            int r = Orig(written, states, count, id);                                        \
+            sl::app::OnNpadStates(states, count);                                            \
+            return r;                                                                        \
+        }                                                                                    \
+    };                                                                                       \
+    HOOK_DEFINE_TRAMPOLINE(NpadStates##type) {                                               \
+        static void Callback(void* states, int count, const u32& id) {                       \
+            Orig(states, count, id);                                                         \
+            sl::app::OnNpadStates(states, count);                                            \
+        }                                                                                    \
+    };                                                                                       \
+    HOOK_DEFINE_TRAMPOLINE(NpadState##type) {                                                \
+        static void Callback(void* state, const u32& id) {                                   \
+            Orig(state, id);                                                                 \
+            sl::app::OnNpadStates(state, 1);                                                 \
+        }                                                                                    \
+    };
+NPAD_HOOKS(FullKey)
+NPAD_HOOKS(Handheld)
+NPAD_HOOKS(JoyDual)
+NPAD_HOOKS(JoyLeft)
+NPAD_HOOKS(JoyRight)
+
+template <typename Hook> static int HookSdk(const char* name) {
+    uintptr_t at = SdkSymbol(name);
+    if (!at) return 0;
+    Hook::InstallAtPtr(at);
+    return 1;
+}
+
+#define NPAD_INSTALL(type, mangled)                                                              \
+    n += HookSdk<NpadDetail##type>("_ZN2nn3hid6detail13GetNpadStatesEPiPNS0_" mangled "EiRKj");  \
+    n += HookSdk<NpadStates##type>("_ZN2nn3hid13GetNpadStatesEPNS0_" mangled "EiRKj");           \
+    n += HookSdk<NpadState##type>("_ZN2nn3hid12GetNpadStateEPNS0_" mangled "ERKj");
+
+static void InstallAppHooks() {
+    if (!HookSdk<NvnBootstrap>("nvnBootstrapLoader")) return;   /* no NVN hook: no input hooks either */
+    sl::g_AppNvnHook = true;
+    int n = 0;
+    NPAD_INSTALL(FullKey, "16NpadFullKeyState")
+    NPAD_INSTALL(Handheld, "17NpadHandheldState")
+    NPAD_INSTALL(JoyDual, "16NpadJoyDualState")
+    NPAD_INSTALL(JoyLeft, "16NpadJoyLeftState")
+    NPAD_INSTALL(JoyRight, "17NpadJoyRightState")
+    sl::g_AppNpadHooks = n;
+    if (n) sl::app::SetInputHooked();
+    if (uintptr_t alloc = SdkSymbol("aligned_alloc")) {
+        sl::app::SetAllocator(reinterpret_cast<sl::app::AllocFn>(alloc));
+        sl::g_AppAlloc = true;
+    }
+}
+
 extern "C" void exl_main(void* x0, void* x1) {
     exl::hook::Initialize();
     MainHook::InstallAtFuncPtr(nnMain);
+    InstallAppHooks();
     LandFlagGet::InstallAtOffset(0x263ea30);
     LandFlagGetBool::InstallAtOffset(0x263f0a0);
     LandFlagSet::InstallAtOffset(0x263f3c4);
