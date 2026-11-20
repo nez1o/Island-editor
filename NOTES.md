@@ -91,6 +91,10 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   is redrawn and flushed (`RedrawGyroid`); a PC check showed it matches a full redraw for every step.
 - Sway: while hopping the gyroid also wobbles one sprite pixel sideways (`SwayOf`: up 1 = left, up 1 on
   the way down = right; mirrored on the second hop). The redraw patch is one pixel wider on each side.
+- Header notes: two pixel music notes left of the gyroid (`DrawNotes`, drawn at the gyroid's pixel size,
+  1-px brown outline) bounce in counter-time like the icon's and wiggle during a blink. `BobNow()` carries
+  the wiggle (flag 16, swaps every 50 ms) so the menu and the icon use the same clock. The redraw patch
+  covers notes + gyroid, the full header height.
 - Blink: sprite frame 2 (pose 0, eyes shut) replaces the first rest step of loops 0 and 2 of every 5
   (every 3.2 / 4.8 s); the icon has a matching 7th frame. `BobNow()` returns step + 8 while blinking.
 - Phone icon animation: the module also wraps `nvnMemoryPoolBuilderSetStorage` / `nvnMemoryPoolInitialize`

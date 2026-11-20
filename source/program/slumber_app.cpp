@@ -695,7 +695,6 @@ namespace sl::app {
 
     /* Where the gyroid sits at rest; it hops up to two of its own pixels from there. */
     struct GyroidBox { int x, y, px; };
-    constexpr int HopPixels = 2;
     static int s_Bob = 0;   /* animation step, see BobNow */
 
     static GyroidBox GyroidPlace() {
@@ -707,13 +706,17 @@ namespace sl::app {
     /* Animation step from the clock: 8 steps of 0.2 s. Each half is one hop (rest, up 1, up 2, up 1)
        and the arm pose swaps every hop, so the arms flap like a gyroid playing its sound. On some loops
        (every 3.2 / 4.8 s, alternating) the first rest step is a blink. Returns step + 8 when blinking. */
-    constexpr int AnimSteps = 8, BlinkFlag = 8, BlinkFrame = 2;
+    constexpr int AnimSteps = 8, BlinkFlag = 8, WiggleFlag = 16, BlinkFrame = 2;
     static int BobNow() {
         u64 period = TickFreq() * 16 / 10, now = Ticks();
         int step = (int)((now % period) * AnimSteps / period);
         u64 loop = now / period;
         bool blink = step == 0 && (loop % 5 == 0 || loop % 5 == 2);
-        return step | (blink ? BlinkFlag : 0);
+        if (!blink) return step;
+        /* while it blinks the music notes wiggle: one way / the other, swapping every 50 ms */
+        u64 stepTicks = period / AnimSteps;
+        bool wiggle = (now % period % stepTicks) * 4 / stepTicks % 2;
+        return step | BlinkFlag | (wiggle ? WiggleFlag : 0);
     }
     static int HopOf(int step) { static const int k[4] = { 0, 1, 2, 1 }; return k[step % 4]; }
     /* Side-to-side wobble while hopping (sprite pixels, + = right): one way on the way up, the other on
@@ -721,15 +724,44 @@ namespace sl::app {
     static int SwayOf(int step) { static const int k[4] = { 0, -1, 0, 1 }; return (step & 7) < 4 ? k[step % 4] : -k[step % 4]; }
     static int PoseOf(int step) { return (step & 7) / 4; }
     static bool BlinkOf(int step) { return step & BlinkFlag; }
+    static int WiggleOf(int step) { return !BlinkOf(step) ? 0 : (step & WiggleFlag) ? 1 : -1; }
     static int SpriteFrameOf(int step) { return BlinkOf(step) && GyroidFrames > BlinkFrame ? BlinkFrame : PoseOf(step); }
 
     /* Redraws only the gyroid's patch of the header; returns the canvas rows touched. */
+    /* Two music notes left of the gyroid, like on the phone icon: they bounce in counter-time (one rises
+       while the other falls, swapping each arm flap) and wiggle while the gyroid blinks. */
+    static const char* const k_Note[] = { "...XXX", "...XXX", "...X..", "...X..", "...X..", ".XXX..", "XXXX..", ".XX..." };
+    constexpr int NoteW = 6, NoteH = 8, NotesW = 17;   /* the notes' strip, in sprite pixels */
+
+    static void DrawNote(int x, int y, int px) {
+        auto on = [](int c, int r) { return r >= 0 && r < NoteH && c >= 0 && c < NoteW && k_Note[r][c] == 'X'; };
+        for (int pass = 0; pass < 2; pass++)
+            for (int r = -1; r <= NoteH; r++)
+                for (int c = -1; c <= NoteW; c++) {
+                    bool ink = !on(c, r) && (on(c - 1, r) || on(c + 1, r) || on(c, r - 1) || on(c, r + 1));
+                    if (pass == 0 && ink) FillRect(x + c * px, y + r * px, px, px, Rgb{ 92, 58, 34 });
+                    if (pass == 1 && on(c, r)) FillRect(x + c * px, y + r * px, px, px, Rgb{ 255, 248, 226 });
+                }
+    }
+
+    static int NotesLeft(const GyroidBox& box) { return box.x - (NotesW + 2) * box.px; }
+
+    static void DrawNotes(const GyroidBox& box, int step) {
+        int px = box.px, hop = HopOf(step), wig = WiggleOf(step);
+        int rise = PoseOf(step) == 0 ? hop : 2 - hop;
+        int top = BorderPx() + px * 2;
+        int nx = NotesLeft(box) + px;
+        DrawNote(nx + (10 + wig) * px, top + (2 - rise - (wig != 0)) * px, px);
+        DrawNote(nx + (1 - wig) * px, top + (14 - (2 - rise) + (wig != 0)) * px, px);
+    }
+
     static void RedrawGyroid(int* rowFirst, int* rowLast) {
         GyroidBox box = GyroidPlace();
-        int x0 = box.x - box.px, x1 = box.x + (GyroidW + 1) * box.px;   /* room for the sway */
-        int y0 = box.y - HopPixels * box.px, y1 = box.y + GyroidH * box.px;
+        int x0 = NotesLeft(box), x1 = box.x + (GyroidW + 1) * box.px;   /* notes + room for the sway */
+        int y0 = BorderPx(), y1 = U(HeaderH);
         s_ClipX0 = x0; s_ClipX1 = x1; s_ClipY0 = y0; s_ClipY1 = y1;
         DrawHeader(y0, y1);
+        DrawNotes(box, s_Bob);
         DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
         s_ClipX0 = 0; s_ClipX1 = 1 << 30; s_ClipY0 = 0; s_ClipY1 = s_PixH;
         int a = s_Flip ? s_PixH - y1 : y0, z = s_Flip ? s_PixH - 1 - y0 : y1 - 1;
@@ -748,8 +780,9 @@ namespace sl::app {
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
         GyroidBox box = GyroidPlace();
+        DrawNotes(box, s_Bob);
         DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
-        DrawText(s_F->small, box.x - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
+        DrawText(s_F->small, NotesLeft(box) - U(6), U(40), "made by saiplatano", ColSubtitle, 0, 2);
 
         /* faint polka dots on the paper, like the game's menus */
         s_ClipY0 = U(HeaderH); s_ClipY1 = U(FooterTop);
@@ -1009,10 +1042,7 @@ namespace sl::app {
         if (!tex) { s_IconShown = -1; return; }
         int step = BobNow();
         int frame = PoseOf(step) * IconSteps + step % IconSteps;
-        if (BlinkOf(step)) {   /* the notes wiggle while it blinks: the two blink frames swap every 50 ms */
-            u64 stepTicks = TickFreq() * 16 / 10 / AnimSteps;
-            frame = IconFrameCount - 2 + (int)((Ticks() % stepTicks) * 4 / stepTicks) % 2;
-        }
+        if (BlinkOf(step)) frame = IconFrameCount - 2 + (WiggleOf(step) > 0);   /* blink, notes wiggling */
         if (frame == s_IconShown || frame >= IconFrameCount) return;
         if (!InitIcon()) return;
         CmdBegin();
