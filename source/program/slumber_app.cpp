@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 #include <type_traits>
 
 /* ---- The Slumber phone app's screen ----
@@ -579,6 +580,8 @@ namespace sl::app {
 
     static bool Pressed(u64 mask) { return (s_Held & mask) && !(s_PrevHeld & mask); }
 
+    static void Sparkle();   /* the gyroid sparkles (header animation, below) */
+
     static void HandleInput() {
         static Repeat up, down, left, right, pgUp, pgDown;
         int count = AppRowCount();
@@ -591,10 +594,17 @@ namespace sl::app {
         if (sel != s_Sel) { s_Sel = sel; s_Dirty = true; }
         AppRow row;
         AppRowGet(s_Sel, &row);
-        if (Pressed(BtnA)) { AppRowChange(s_Sel, 0); s_Dirty = true; }
         int l = row.value ? Fire(BtnLeft, left) : Pressed(BtnLeft), r = row.value ? Fire(BtnRight, right) : Pressed(BtnRight);
-        for (; l > 0; l--) { AppRowChange(s_Sel, -1); s_Dirty = true; }
-        for (; r > 0; r--) { AppRowChange(s_Sel, 1); s_Dirty = true; }
+        bool a = Pressed(BtnA);
+        if (a || l || r) {
+            if (a) AppRowChange(s_Sel, 0);
+            for (; l > 0; l--) AppRowChange(s_Sel, -1);
+            for (; r > 0; r--) AppRowChange(s_Sel, 1);
+            AppRow after;
+            AppRowGet(s_Sel, &after);
+            if (after.on != row.on || after.number != row.number) Sparkle();   /* it changed: the gyroid sparkles */
+            s_Dirty = true;
+        }
         if (Pressed(BtnB)) {
             s_State.store(State::Draining);
             Log("app: closed");
@@ -707,11 +717,25 @@ namespace sl::app {
        and the arm pose swaps every hop, so the arms flap like a gyroid playing its sound. On some loops
        (every 3.2 / 4.8 s, alternating) the first rest step is a blink. Returns step + 8 when blinking. */
     constexpr int AnimSteps = 8, BlinkFlag = 8, WiggleFlag = 16, BlinkFrame = 2;
+
+    /* Sparkles when a setting changes: phases of 0.1 s, -1 when none. */
+    constexpr int SparkleShift = 5, SparklePhases = 6;
+    static u64 s_SparkleTick = 0;
+    static bool s_SparkleOn = false;
+    static void Sparkle() { s_SparkleTick = Ticks(); s_SparkleOn = true; }
+    static int SparklePhaseNow(u64 now) {
+        if (!s_SparkleOn) return -1;
+        u64 phase = (now - s_SparkleTick) * 10 / TickFreq();
+        if (phase >= (u64)SparklePhases) { s_SparkleOn = false; return -1; }
+        return (int)phase;
+    }
     static int BobNow() {
         u64 period = TickFreq() * 16 / 10, now = Ticks();
         int step = (int)((now % period) * AnimSteps / period);
         u64 loop = now / period;
         bool blink = step == 0 && (loop % 5 == 0 || loop % 5 == 2);
+        int sparkle = SparklePhaseNow(now);
+        if (sparkle >= 0) step |= (sparkle + 1) << SparkleShift;
         if (!blink) return step;
         /* while it blinks the music notes wiggle: one way / the other, swapping every 50 ms */
         u64 stepTicks = period / AnimSteps;
@@ -725,6 +749,7 @@ namespace sl::app {
     static int PoseOf(int step) { return (step & 7) / 4; }
     static bool BlinkOf(int step) { return step & BlinkFlag; }
     static int WiggleOf(int step) { return !BlinkOf(step) ? 0 : (step & WiggleFlag) ? 1 : -1; }
+    static int SparkleOf(int step) { return (step >> SparkleShift) - 1; }
     static int SpriteFrameOf(int step) { return BlinkOf(step) && GyroidFrames > BlinkFrame ? BlinkFrame : PoseOf(step); }
 
     /* Redraws only the gyroid's patch of the header; returns the canvas rows touched. */
@@ -746,6 +771,34 @@ namespace sl::app {
 
     static int NotesLeft(const GyroidBox& box) { return box.x - (NotesW + 2) * box.px; }
 
+    /* The sparkle burst: four twinkles around the gyroid, each one a small "+", then a star, then a "+"
+       again, starting one after another (positions in sprite pixels from the gyroid's corner). */
+    struct Twinkle { int x, y, delay; };
+    static const Twinkle k_Twinkles[] = { { 3, 1, 0 }, { 21, 3, 1 }, { 26, 14, 2 }, { -2, 11, 3 } };
+    constexpr int SparkleRight = 5;   /* sprite pixels right of the gyroid the burst may reach */
+
+    static void DrawTwinkle(int cx, int cy, int px, bool big) {
+        Rgb glow = { 255, 236, 120 }, core = { 255, 255, 255 };
+        int arm = big ? 2 : 1;
+        for (int d = 1; d <= arm; d++) {
+            Rgb c = d == arm && big ? glow : core;
+            FillRect(cx - d * px, cy, px, px, c); FillRect(cx + d * px, cy, px, px, c);
+            FillRect(cx, cy - d * px, px, px, c); FillRect(cx, cy + d * px, px, px, c);
+        }
+        if (big) for (int dx : { -1, 1 }) for (int dy : { -1, 1 }) FillRect(cx + dx * px, cy + dy * px, px, px, glow);
+        FillRect(cx, cy, px, px, core);
+    }
+
+    static void DrawSparkles(const GyroidBox& box, int step) {
+        int phase = SparkleOf(step);
+        if (phase < 0) return;
+        for (const Twinkle& t : k_Twinkles) {
+            int k = phase - t.delay;
+            if (k < 0 || k > 2) continue;
+            DrawTwinkle(box.x + t.x * box.px, box.y + t.y * box.px, box.px, k == 1);
+        }
+    }
+
     static void DrawNotes(const GyroidBox& box, int step) {
         int px = box.px, hop = HopOf(step), wig = WiggleOf(step);
         int rise = PoseOf(step) == 0 ? hop : 2 - hop;
@@ -757,12 +810,17 @@ namespace sl::app {
 
     static void RedrawGyroid(int* rowFirst, int* rowLast) {
         GyroidBox box = GyroidPlace();
-        int x0 = NotesLeft(box), x1 = box.x + (GyroidW + 1) * box.px;   /* notes + room for the sway */
+        int x0 = NotesLeft(box), x1 = box.x + (GyroidW + SparkleRight) * box.px;   /* notes, sway, sparkles */
         int y0 = BorderPx(), y1 = U(HeaderH);
         s_ClipX0 = x0; s_ClipX1 = x1; s_ClipY0 = y0; s_ClipY1 = y1;
+        /* same layers as Render (frame, paper, header), so the header's rounded corner blends the same */
+        int b = BorderPx();
+        FillRect(0, 0, s_PixW, s_PixH, ColBorder);
+        FillRound(b, b, s_PixW - 2 * b, s_PixH - 2 * b, U(PanelRadius) - b, ColBg);
         DrawHeader(y0, y1);
         DrawNotes(box, s_Bob);
         DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
+        DrawSparkles(box, s_Bob);
         s_ClipX0 = 0; s_ClipX1 = 1 << 30; s_ClipY0 = 0; s_ClipY1 = s_PixH;
         int a = s_Flip ? s_PixH - y1 : y0, z = s_Flip ? s_PixH - 1 - y0 : y1 - 1;
         *rowFirst = a < 0 ? 0 : a;
@@ -782,6 +840,7 @@ namespace sl::app {
         GyroidBox box = GyroidPlace();
         DrawNotes(box, s_Bob);
         DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
+        DrawSparkles(box, s_Bob);
         DrawText(s_F->small, NotesLeft(box) - U(6), U(40), "made by saiplatano", ColSubtitle, 0, 2);
 
         /* faint polka dots on the paper, like the game's menus */

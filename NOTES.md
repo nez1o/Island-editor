@@ -95,6 +95,11 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   1-px brown outline) bounce in counter-time like the icon's and wiggle during a blink. `BobNow()` carries
   the wiggle (flag 16, swaps every 50 ms) so the menu and the icon use the same clock. The redraw patch
   covers notes + gyroid, the full header height.
+- Sparkle: when a row's value actually changes (A / left / right), four pixel twinkles pop up around the
+  gyroid one after another ("+", star, "+"; 6 phases of 0.1 s, `DrawSparkles`). The phase rides in the
+  animation state (bits 5+). The redraw patch reaches 5 sprite pixels right of the gyroid and repaints
+  frame + paper first, so the header's rounded corner blends exactly like a full redraw (checked on a PC
+  for all 168 states).
 - Blink: sprite frame 2 (pose 0, eyes shut) replaces the first rest step of loops 0 and 2 of every 5
   (every 3.2 / 4.8 s); the icon has a matching 7th frame. `BobNow()` returns step + 8 while blinking.
 - Phone icon animation: the module also wraps `nvnMemoryPoolBuilderSetStorage` / `nvnMemoryPoolInitialize`
