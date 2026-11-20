@@ -1,0 +1,29 @@
+# Editor / build output
+.vscode/*
+build/*
+out/*
+deploy/*
+__pycache__/
+*.elf
+*.nso
+*.npdm
+subsdk*
+
+# Nintendo game data: never commit. Players build it from their own dump (tools/build_romfs.py),
+# or get it from a release zip.
+romfs/
+aden_romfs/
+*.bcsv
+*.byml
+*.bfevfl
+*.sarc
+*.zs
+*.srsizetable
+*.pack
+*.bntx
+*.msbt
+main.bin
+
+# Third-party patches (credited in the README, not redistributed here)
+*.ips
+*.pchtxt
