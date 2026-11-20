@@ -82,6 +82,7 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
 - **Fallback**: `app::Ready()` (checked when the app is tapped) falls back to the old talk menu (Island
   Designer flow, entry `SlumberApp`) when NVN wasn't seen, the format is unknown, no controller hook ran,
   or memory can't be allocated; the reason is logged. The romfs talk menu is still needed for that.
+- Header: "Gyroid's menu", watermark "made by saiplatano" with a 16x16 pixel gyroid (`k_Gyroid`).
 - Look: Animal Crossing palette (cream dotted paper, leaf-green header, yellow cursor, teal ON). Input is
   quick: repeat after 0.2 s, every 50 ms, 25 ms after holding 1 s (several steps per 30 fps frame); the list
   glides to the cursor in about 3 frames.
