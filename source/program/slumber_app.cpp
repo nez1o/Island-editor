@@ -1008,7 +1008,11 @@ namespace sl::app {
         void* tex = s_IconTex.load(std::memory_order_acquire);
         if (!tex) { s_IconShown = -1; return; }
         int step = BobNow();
-        int frame = BlinkOf(step) ? IconFrameCount - 1 : PoseOf(step) * IconSteps + step % IconSteps;
+        int frame = PoseOf(step) * IconSteps + step % IconSteps;
+        if (BlinkOf(step)) {   /* the notes wiggle while it blinks: the two blink frames swap every 50 ms */
+            u64 stepTicks = TickFreq() * 16 / 10 / AnimSteps;
+            frame = IconFrameCount - 2 + (int)((Ticks() % stepTicks) * 4 / stepTicks) % 2;
+        }
         if (frame == s_IconShown || frame >= IconFrameCount) return;
         if (!InitIcon()) return;
         CmdBegin();

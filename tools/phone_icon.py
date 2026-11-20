@@ -44,9 +44,10 @@ def _inked(layer, ink):
     out.alpha_composite(layer)
     return out
 
-def draw_icon(size=180, hop=0, pose=0, blink=False, sway=0):
+def draw_icon(size=180, hop=0, pose=0, blink=False, sway=0, wiggle=0):
     """hop: sprite pixels up (0-2), pose: arm pose (sprite frame), blink: eyes shut (pose 0 only),
-    sway: sprite pixels right (-1..1). All 0 is the romfs icon."""
+    sway: sprite pixels right (-1..1), wiggle: notes shaken one way (+1) or the other (-1).
+    All 0 is the romfs icon."""
     import os, sys
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
@@ -64,8 +65,9 @@ def draw_icon(size=180, hop=0, pose=0, blink=False, sway=0):
     # the notes bounce in counter-time: one rises while the other falls, swapping each arm flap
     note = lambda ch: CREAM if ch == 'X' else None
     rise = hop if pose == 0 else 2 - hop
-    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 5, 134, 24 - rise * 5), 4))
-    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 4, 150, 82 - (2 - rise) * 5), 4))
+    # while the gyroid blinks the notes wiggle: shaken sideways in opposite directions
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 5, 134 + wiggle * 4, 24 - rise * 5 - abs(wiggle) * 2), 4))
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 4, 150 - wiggle * 4, 82 - (2 - rise) * 5 + abs(wiggle) * 2), 4))
     return img
 
 # ---------------------------------------------------------------- ASTC 5x4 (sRGB) encoder / decoder
@@ -170,7 +172,8 @@ def decode_image(data, w, h):
 # ---------------------------------------------------------------- animation frames for the module
 # The module finds the icon texture once the game loads it (by two of its ASTC blocks, which tiling keeps
 # whole) and copies these frames in, so the phone's gyroid hops, sways and flaps like the menu's. Frame
-# pose * 4 + step, then one blink frame (resting, eyes shut); frame 0 is exactly the romfs icon.
+# pose * 4 + step, then two blink frames (resting, eyes shut, the notes wiggled either way) that
+# alternate every 50 ms during a blink; frame 0 is exactly the romfs icon.
 ICON_STEPS, ICON_POSES = 4, 2
 HOPS = (0, 1, 2, 1)       # per step: sprite pixels up
 SWAYS = (0, -1, 0, 1)     # per step: sprite pixels sideways (mirrored for pose 1), like the menu
@@ -183,8 +186,9 @@ def write_frames(path):
             data, bw, bh = encode_image(draw_icon(180, HOPS[step], pose, sway=sway))
             frames.append(data)
             print('frame', len(frames) - 1, 'hop', HOPS[step], 'sway', sway, 'pose', pose)
-    frames.append(encode_image(draw_icon(180, 0, 0, blink=True))[0])   # last frame: resting, eyes shut
-    print('frame', len(frames) - 1, 'blink')
+    for wiggle in (-1, 1):   # last two frames: resting, eyes shut, notes wiggling
+        frames.append(encode_image(draw_icon(180, 0, 0, blink=True, wiggle=wiggle))[0])
+        print('frame', len(frames) - 1, 'blink, wiggle', wiggle)
     blocks = [frames[0][i:i + 16] for i in range(0, len(frames[0]), 16)]
     # signature: the two most "busy" blocks that occur once in the icon and are not solid (void) blocks
     def busy(b): return len(set(b))
