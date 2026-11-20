@@ -716,6 +716,9 @@ namespace sl::app {
         return step | (blink ? BlinkFlag : 0);
     }
     static int HopOf(int step) { static const int k[4] = { 0, 1, 2, 1 }; return k[step % 4]; }
+    /* Side-to-side wobble while hopping (sprite pixels, + = right): one way on the way up, the other on
+       the way down, mirrored on the second hop like the arms. */
+    static int SwayOf(int step) { static const int k[4] = { 0, -1, 0, 1 }; return (step & 7) < 4 ? k[step % 4] : -k[step % 4]; }
     static int PoseOf(int step) { return (step & 7) / 4; }
     static bool BlinkOf(int step) { return step & BlinkFlag; }
     static int SpriteFrameOf(int step) { return BlinkOf(step) && GyroidFrames > BlinkFrame ? BlinkFrame : PoseOf(step); }
@@ -723,11 +726,11 @@ namespace sl::app {
     /* Redraws only the gyroid's patch of the header; returns the canvas rows touched. */
     static void RedrawGyroid(int* rowFirst, int* rowLast) {
         GyroidBox box = GyroidPlace();
-        int x0 = box.x, x1 = box.x + GyroidW * box.px;
+        int x0 = box.x - box.px, x1 = box.x + (GyroidW + 1) * box.px;   /* room for the sway */
         int y0 = box.y - HopPixels * box.px, y1 = box.y + GyroidH * box.px;
         s_ClipX0 = x0; s_ClipX1 = x1; s_ClipY0 = y0; s_ClipY1 = y1;
         DrawHeader(y0, y1);
-        DrawGyroid(box.x, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
+        DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
         s_ClipX0 = 0; s_ClipX1 = 1 << 30; s_ClipY0 = 0; s_ClipY1 = s_PixH;
         int a = s_Flip ? s_PixH - y1 : y0, z = s_Flip ? s_PixH - 1 - y0 : y1 - 1;
         *rowFirst = a < 0 ? 0 : a;
@@ -745,7 +748,7 @@ namespace sl::app {
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
         GyroidBox box = GyroidPlace();
-        DrawGyroid(box.x, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
+        DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
         DrawText(s_F->small, box.x - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
 
         /* faint polka dots on the paper, like the game's menus */
@@ -1005,7 +1008,7 @@ namespace sl::app {
         void* tex = s_IconTex.load(std::memory_order_acquire);
         if (!tex) { s_IconShown = -1; return; }
         int step = BobNow();
-        int frame = BlinkOf(step) ? IconFrameCount - 1 : PoseOf(step) * IconHops + HopOf(step);
+        int frame = BlinkOf(step) ? IconFrameCount - 1 : PoseOf(step) * IconSteps + step % IconSteps;
         if (frame == s_IconShown || frame >= IconFrameCount) return;
         if (!InitIcon()) return;
         CmdBegin();
