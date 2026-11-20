@@ -94,7 +94,7 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   scanned (before init) for two ASTC blocks of the romfs icon (`k_IconSig`; block-linear tiling keeps
   16-byte blocks whole); a 180x180 texture created within 64 KB before them is the icon. While it exists,
   each animation step change copies the matching frame (`icon_frames.inc`, 6 frames = 3 hops x 2 arm
-  poses, from `phone_icon.py --frames`; frame 0 = the romfs icon) into it with
+  poses, the music notes bouncing in counter-time; from `phone_icon.py --frames`; frame 0 = the romfs icon) into it with
   `nvnCommandBufferCopyBufferToTexture` (row stride 36 x 16 bytes). Base mip level only. The copies share
   one recording per frame with the panel. A PC test tiled the icon at block heights 1-16 into random
   data: found every time, no false match. Needs the rebuilt romfs (old icons have no signature).

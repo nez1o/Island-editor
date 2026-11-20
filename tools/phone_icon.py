@@ -60,9 +60,11 @@ def draw_icon(size=180, hop=0, pose=0):
     gx, gy = (size - gw) // 2 - 14, size - gh - 18 - hop * scale
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     img.alpha_composite(_inked(_sprite_layer(size, rows, gyroid_colour, scale, gx, gy), 5))
+    # the notes bounce in counter-time: one rises while the other falls, swapping each arm flap
     note = lambda ch: CREAM if ch == 'X' else None
-    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 5, 128, 22), 4))
-    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 4, 146, 70), 4))
+    rise = hop if pose == 0 else 2 - hop
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 5, 134, 24 - rise * 5), 4))
+    img.alpha_composite(_inked(_sprite_layer(size, NOTE, note, 4, 150, 82 - (2 - rise) * 5), 4))
     return img
 
 # ---------------------------------------------------------------- ASTC 5x4 (sRGB) encoder / decoder
