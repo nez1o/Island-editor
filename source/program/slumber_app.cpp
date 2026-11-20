@@ -544,9 +544,9 @@ namespace sl::app {
     /* The gyroid next to the watermark (tools/gyroid_art.py makes it from a picture). */
 #include "gyroid_sprite.inc"
 
-    static void DrawGyroid(int x, int y, int px) {
+    static void DrawGyroid(int x, int y, int px, int frame) {
         for (int r = 0; r < GyroidH; r++) {
-            const char* line = k_Gyroid[r];
+            const char* line = k_Gyroid[frame % GyroidFrames][r];
             for (int c = 0; line[c]; c++) {
                 char ch = line[c];
                 int k = ch >= '1' && ch <= '9' ? ch - '1' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 9 : -1;
@@ -575,9 +575,10 @@ namespace sl::app {
         s_ClipY0 = c0; s_ClipY1 = c1;
     }
 
-    /* Where the gyroid sits at rest; it bobs one of its own pixels up and down from there. */
+    /* Where the gyroid sits at rest; it hops up to two of its own pixels from there. */
     struct GyroidBox { int x, y, px; };
-    static int s_Bob = 0;   /* -1 up, 0, +1 down (in sprite pixels) */
+    constexpr int HopPixels = 2;
+    static int s_Bob = 0;   /* animation step, see BobNow */
 
     static GyroidBox GyroidPlace() {
         int px = U(54) / GyroidH < 2 ? 2 : U(54) / GyroidH;   /* fills most of the header, whole pixels */
@@ -585,21 +586,24 @@ namespace sl::app {
         return { s_PixW - U(24) - GyroidW * px, (hh + b - GyroidH * px) / 2, px };
     }
 
-    /* Bob phase from the clock: a 1.6 s loop of rest, up, rest, down. */
+    /* Animation step from the clock: 8 steps of 0.2 s. Each half is one hop (rest, up 1, up 2, up 1)
+       and the arm pose swaps every hop, so the arms flap like a gyroid playing its sound. */
+    constexpr int AnimSteps = 8;
     static int BobNow() {
         u64 period = TickFreq() * 16 / 10;
-        int quarter = (int)((Ticks() % period) * 4 / period);
-        return quarter == 1 ? -1 : quarter == 3 ? 1 : 0;
+        return (int)((Ticks() % period) * AnimSteps / period);
     }
+    static int HopOf(int step) { static const int k[4] = { 0, 1, 2, 1 }; return k[step % 4]; }
+    static int PoseOf(int step) { return step / 4; }
 
     /* Redraws only the gyroid's patch of the header; returns the canvas rows touched. */
     static void RedrawGyroid(int* rowFirst, int* rowLast) {
         GyroidBox box = GyroidPlace();
         int x0 = box.x, x1 = box.x + GyroidW * box.px;
-        int y0 = box.y - box.px, y1 = box.y + (GyroidH + 1) * box.px;
+        int y0 = box.y - HopPixels * box.px, y1 = box.y + GyroidH * box.px;
         s_ClipX0 = x0; s_ClipX1 = x1; s_ClipY0 = y0; s_ClipY1 = y1;
         DrawHeader(y0, y1);
-        DrawGyroid(box.x, box.y + s_Bob * box.px, box.px);
+        DrawGyroid(box.x, box.y - HopOf(s_Bob) * box.px, box.px, PoseOf(s_Bob));
         s_ClipX0 = 0; s_ClipX1 = 1 << 30; s_ClipY0 = 0; s_ClipY1 = s_PixH;
         int a = s_Flip ? s_PixH - y1 : y0, z = s_Flip ? s_PixH - 1 - y0 : y1 - 1;
         *rowFirst = a < 0 ? 0 : a;
@@ -617,7 +621,7 @@ namespace sl::app {
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
         GyroidBox box = GyroidPlace();
-        DrawGyroid(box.x, box.y + s_Bob * box.px, box.px);
+        DrawGyroid(box.x, box.y - HopOf(s_Bob) * box.px, box.px, PoseOf(s_Bob));
         DrawText(s_F->small, box.x - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
 
         /* faint polka dots on the paper, like the game's menus */
