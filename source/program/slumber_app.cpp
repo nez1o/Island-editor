@@ -574,7 +574,7 @@ namespace sl::app {
         s_ClipY0 = 0; s_ClipY1 = H;
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
-        int px = U(48) / GyroidH < 1 ? 1 : U(48) / GyroidH;   /* about 48 units tall, whole pixels */
+        int px = U(54) / GyroidH < 2 ? 2 : U(54) / GyroidH;   /* fills most of the header, whole pixels */
         int gx = W - U(24) - GyroidW * px, gy = (hh + b - GyroidH * px) / 2;
         DrawGyroid(gx, gy, px);
         DrawText(s_F->small, gx - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);

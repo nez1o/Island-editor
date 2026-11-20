@@ -83,6 +83,8 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
 - **Fallback**: `app::Ready()` (checked when the app is tapped) falls back to the old talk menu (Island
   Designer flow, entry `SlumberApp`) when NVN wasn't seen, the format is unknown, no controller hook ran,
   or memory can't be allocated; the reason is logged. The romfs talk menu is still needed for that.
+- Gyroid sprite: hand-placed after a City Folk gyroid picture in `tools/gyroid_design.py` (24x25, eye
+  sparkles + blush), which writes `gyroid_sprite.inc`.
 - Header: "Gyroid's menu", watermark "made by saiplatano" with the gyroid from `gyroid_sprite.inc`
   (any size; drawn about 48 units tall in whole pixels). `tools/gyroid_art.py <picture> <inc> [height]`
   turns a picture into it; the phone icon (`phone_icon.py`) draws the same sprite on a clay tile. The
