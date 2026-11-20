@@ -1,6 +1,6 @@
-# SlumberToggle
+# Island Editor
 
-An [exlaunch](https://github.com/shadowninja108/exlaunch) code mod for **Animal Crossing: New Horizons 3.0.3**
+SlumberToggle, an [exlaunch](https://github.com/shadowninja108/exlaunch) code mod for **Animal Crossing: New Horizons 3.0.3**
 (build id `FF1D1C05670DB602`). It brings Slumber Island features to your main island, adds an island editor
 and stacked cliffs, and lets you switch every feature on or off in game. Tested on Switch (Atmosphère), Eden and Ryujinx.
 
