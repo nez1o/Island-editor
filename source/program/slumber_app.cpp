@@ -160,6 +160,118 @@ namespace sl::app {
         return r;
     }
 
+    /* ---- finding the phone icon's texture ----
+       When the game loads the phone button layout, its textures sit in a memory pool built over the
+       loaded file. Pools (up to 16 MB) are scanned for two ASTC blocks of the romfs icon before they
+       are created (tiling keeps 16-byte blocks whole); a texture created in such a pool around that
+       spot, 180x180, is the icon. */
+#include "icon_frames.inc"
+
+    static int HexNibble(char c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
+
+    using PoolSetStorageFn = void (*)(void* builder, void* memory, size_t size);
+    using PoolInitFn       = u8 (*)(void* pool, const void* builder);
+    using PoolFinalizeFn   = void (*)(void* pool);
+    using TexSetStorageFn  = void (*)(void* builder, const void* pool, ptrdiff_t offset);
+    using TexInitFn        = u8 (*)(void* texture, const void* builder);
+    using TexFinalizeFn    = void (*)(void* texture);
+    static PoolSetStorageFn s_RealPoolSetStorage;
+    static PoolInitFn       s_RealPoolInit;
+    static PoolFinalizeFn   s_RealPoolFinalize;
+    static TexSetStorageFn  s_RealTexSetStorage;
+    static TexInitFn        s_RealTexInit;
+    static TexFinalizeFn    s_RealTexFinalize;
+
+    struct BuilderRec { const void* builder; const void* a; ptrdiff_t b; };
+    constexpr int BuilderRecs = 16;
+    static BuilderRec s_PoolBuilders[BuilderRecs], s_TexBuilders[BuilderRecs];
+    static std::atomic<int> s_PoolBuilderNext{0}, s_TexBuilderNext{0};
+    struct IconPool { const void* pool; ptrdiff_t sigOffset; };
+    constexpr int IconPools = 4;
+    static IconPool s_IconPools[IconPools];
+    static std::atomic<void*> s_IconTex{nullptr};
+    static int s_IconShown = -1;
+    static bool s_IconAnimate = true;
+    static u8 s_Sig[2][16];
+    static bool s_SigReady = false;
+
+    static void Remember(BuilderRec* recs, std::atomic<int>& next, const void* builder, const void* a, ptrdiff_t b) {
+        for (int i = 0; i < BuilderRecs; i++)
+            if (recs[i].builder == builder) { recs[i].a = a; recs[i].b = b; return; }
+        int k = next.fetch_add(1) % BuilderRecs;
+        recs[k] = { builder, a, b };
+    }
+
+    static const BuilderRec* Recall(const BuilderRec* recs, const void* builder) {
+        for (int i = 0; i < BuilderRecs; i++) if (recs[i].builder == builder) return &recs[i];
+        return nullptr;
+    }
+
+    static void PoolSetStorage(void* builder, void* memory, size_t size) {
+        s_RealPoolSetStorage(builder, memory, size);
+        Remember(s_PoolBuilders, s_PoolBuilderNext, builder, memory, (ptrdiff_t)size);
+    }
+
+    /* Offset of the icon's signature blocks in [mem, mem + size), or -1. */
+    static ptrdiff_t FindIconSig(const u8* mem, size_t size) {
+        if (!s_SigReady) {
+            for (int s = 0; s < 2; s++)
+                for (int k = 0; k < 16; k++)
+                    s_Sig[s][k] = (u8)(HexNibble(k_IconSig[s][2 * k]) << 4 | HexNibble(k_IconSig[s][2 * k + 1]));
+            s_SigReady = true;
+        }
+        for (size_t a = 0; a + 16 <= size; a += 16) {
+            if (memcmp(mem + a, s_Sig[0], 16) != 0) continue;
+            size_t lo = a > 0x10000 ? a - 0x10000 : 0, hi = a + 0x10000 < size ? a + 0x10000 : size - 16;
+            for (size_t b = lo; b <= hi; b += 16)
+                if (memcmp(mem + b, s_Sig[1], 16) == 0) return (ptrdiff_t)a;
+        }
+        return -1;
+    }
+
+    static u8 PoolInit(void* pool, const void* builder) {
+        const BuilderRec* r = Recall(s_PoolBuilders, builder);
+        ptrdiff_t sig = -1;
+        if (r && r->a && r->b > 0 && r->b <= (16 << 20) && s_IconAnimate)
+            sig = FindIconSig(static_cast<const u8*>(r->a), (size_t)r->b);
+        u8 ok = s_RealPoolInit(pool, builder);
+        if (ok && sig >= 0) {
+            for (IconPool& p : s_IconPools)
+                if (!p.pool || p.pool == pool) { p = { pool, sig }; break; }
+            Log("app: phone icon data found in a memory pool (+%lx)", (unsigned long)sig);
+        }
+        return ok;
+    }
+
+    static void PoolFinalize(void* pool) {
+        for (IconPool& p : s_IconPools) if (p.pool == pool) p = { nullptr, 0 };
+        s_RealPoolFinalize(pool);
+    }
+
+    static void TexSetStorage(void* builder, const void* pool, ptrdiff_t offset) {
+        s_RealTexSetStorage(builder, pool, offset);
+        Remember(s_TexBuilders, s_TexBuilderNext, builder, pool, offset);
+    }
+
+    static u8 TexInit(void* texture, const void* builder) {
+        u8 ok = s_RealTexInit(texture, builder);
+        const BuilderRec* r = ok ? Recall(s_TexBuilders, builder) : nullptr;
+        if (!r) return ok;
+        for (const IconPool& p : s_IconPools) {
+            if (!p.pool || p.pool != r->a || p.sigOffset < r->b || p.sigOffset >= r->b + 0x10000) continue;
+            if (!LoadProcs() || P.TextureGetWidth(texture) != IconSize || P.TextureGetHeight(texture) != IconSize) continue;
+            s_IconTex.store(texture, std::memory_order_release);
+            Log("app: phone icon texture %p - animating it", texture);
+        }
+        return ok;
+    }
+
+    static void TexFinalize(void* texture) {
+        void* expect = texture;
+        s_IconTex.compare_exchange_strong(expect, nullptr);
+        s_RealTexFinalize(texture);
+    }
+
     static GenericFn GetProc(const void* device, const char* name) {
         return WrapProc(name, s_RealGetProc(device, name));
     }
@@ -178,6 +290,12 @@ namespace sl::app {
         if (!strcmp(name, "nvnWindowSetCrop"))            return Wrap(s_RealSetCrop, real, &SetCrop);
         if (!strcmp(name, "nvnDeviceSetWindowOriginMode")) return Wrap(s_RealOrigin, real, &SetOrigin);
         if (!strcmp(name, "nvnCommandBufferInitialize"))  return Wrap(s_RealCmdInit, real, &CmdInit);
+        if (!strcmp(name, "nvnMemoryPoolBuilderSetStorage")) return Wrap(s_RealPoolSetStorage, real, &PoolSetStorage);
+        if (!strcmp(name, "nvnMemoryPoolInitialize"))     return Wrap(s_RealPoolInit, real, &PoolInit);
+        if (!strcmp(name, "nvnMemoryPoolFinalize"))       return Wrap(s_RealPoolFinalize, real, &PoolFinalize);
+        if (!strcmp(name, "nvnTextureBuilderSetStorage")) return Wrap(s_RealTexSetStorage, real, &TexSetStorage);
+        if (!strcmp(name, "nvnTextureInitialize"))        return Wrap(s_RealTexInit, real, &TexInit);
+        if (!strcmp(name, "nvnTextureFinalize"))          return Wrap(s_RealTexFinalize, real, &TexFinalize);
         return real;
     }
 
@@ -687,16 +805,20 @@ namespace sl::app {
 
     /* ---------------------------------------------------------------- GPU side */
 
-    static NvnObject s_PoolBuilder, s_PixPool, s_CmdPool, s_Cmd;
+    static NvnObject s_PoolBuilder, s_PixPool, s_CmdPool, s_Cmd, s_IconPool;
     static u8* s_PixMem = nullptr;
     static u8* s_CmdMem = nullptr;
     static u8* s_CtlMem = nullptr;
+    static u8* s_IconMem = nullptr;
     constexpr size_t PixBytes = ((size_t)MaxPixW * MaxPixH * 4 + 0xfff) & ~(size_t)0xfff;
+    constexpr size_t IconBytes = ((size_t)IconFrameCount * IconFrameBytes + 0xfff) & ~(size_t)0xfff;
     constexpr int CmdSlots = 4;
     constexpr size_t CmdSlotBytes = 0x4000, CtlSlotBytes = 0x2000;
-    static bool s_GpuReady = false;
-    static u64 s_PixAddr = 0;
+    static bool s_GpuReady = false, s_CmdReady = false, s_CmdFailed = false;
+    static int s_IconState = 0;   /* 0 not set up, 1 ready, -1 failed */
+    static u64 s_PixAddr = 0, s_IconAddr = 0;
     static int s_Slot = 0;
+    static bool s_Recording = false;
 
     static bool InitPool(NvnObject& pool, void* mem, size_t size, int flags) {
         P.PoolBuilderSetDefaults(&s_PoolBuilder);
@@ -706,20 +828,33 @@ namespace sl::app {
         return P.PoolInitialize(&pool, &s_PoolBuilder) != 0;
     }
 
-    static bool InitGpu() {
-        if (s_GpuReady) return true;
-        if (!LoadProcs() || !s_PixMem || !s_CmdMem || !s_CtlMem) return false;
-        if (!InitPool(s_PixPool, s_PixMem, PixBytes, PoolCpuCached | PoolGpuUncached) &&
-            !InitPool(s_PixPool, s_PixMem, PixBytes, PoolCpuCached | PoolGpuCached)) {
-            Log("app: could not create the picture memory pool");
-            return false;
-        }
+    /* The command buffer both the panel and the phone icon record into (render thread). */
+    static bool InitCmd() {
+        if (s_CmdReady) return true;
+        if (s_CmdFailed || !LoadProcs() || !s_Alloc) return false;
+        s_CmdFailed = true;   /* until it works */
+        if (!s_CmdMem) s_CmdMem = static_cast<u8*>(s_Alloc(0x1000, CmdSlots * CmdSlotBytes));
+        if (!s_CtlMem) s_CtlMem = static_cast<u8*>(s_Alloc(0x1000, CmdSlots * CtlSlotBytes));
+        if (!s_CmdMem || !s_CtlMem) { Log("app: out of memory for commands"); return false; }
         if (!InitPool(s_CmdPool, s_CmdMem, CmdSlots * CmdSlotBytes, PoolCpuUncached | PoolGpuCached)) {
             Log("app: could not create the command memory pool");
             return false;
         }
         if (!P.CmdInitialize(&s_Cmd, s_Device)) {
             Log("app: could not create the command buffer");
+            return false;
+        }
+        s_CmdFailed = false;
+        s_CmdReady = true;
+        return true;
+    }
+
+    static bool InitGpu() {
+        if (s_GpuReady) return true;
+        if (!InitCmd() || !s_PixMem) return false;
+        if (!InitPool(s_PixPool, s_PixMem, PixBytes, PoolCpuCached | PoolGpuUncached) &&
+            !InitPool(s_PixPool, s_PixMem, PixBytes, PoolCpuCached | PoolGpuCached)) {
+            Log("app: could not create the picture memory pool");
             return false;
         }
         s_Canvas = reinterpret_cast<u32*>(P.PoolMap(&s_PixPool));
@@ -738,12 +873,26 @@ namespace sl::app {
         return false;
     }
 
-    /* Copies the panel into the texture at (dx, dy), skipping the rounded-off corner pixels. */
-    static void SubmitCopy(void* queue, void* tex, int dx, int dy) {
+    /* One recording per presented frame holds every copy; submitted right before the present. */
+    static void CmdBegin() {
+        if (s_Recording) return;
         s_Slot = (s_Slot + 1) % CmdSlots;
         P.CmdAddCommandMemory(&s_Cmd, &s_CmdPool, (ptrdiff_t)(s_Slot * CmdSlotBytes), CmdSlotBytes);
         P.CmdAddControlMemory(&s_Cmd, s_CtlMem + s_Slot * CtlSlotBytes, CtlSlotBytes);
         P.CmdBeginRecording(&s_Cmd);
+        s_Recording = true;
+    }
+
+    static void CmdSubmit(void* queue) {
+        if (!s_Recording) return;
+        s_Recording = false;
+        u64 handle = P.CmdEndRecording(&s_Cmd);
+        P.QueueSubmitCommands(queue, 1, &handle);
+    }
+
+    /* Copies the panel into the texture at (dx, dy), skipping the rounded-off corner pixels. */
+    static void CopyPanel(void* tex, int dx, int dy) {
+        CmdBegin();
         ptrdiff_t stride = (ptrdiff_t)s_PixW * 4;
         P.CmdSetCopyRowStride(&s_Cmd, stride);
         int r = U(PanelRadius);
@@ -755,11 +904,9 @@ namespace sl::app {
         for (int y = 0; y < r; y++) copyRows(y, 1);
         copyRows(r, s_PixH - 2 * r);
         for (int y = s_PixH - r; y < s_PixH; y++) copyRows(y, 1);
-        u64 handle = P.CmdEndRecording(&s_Cmd);
-        P.QueueSubmitCommands(queue, 1, &handle);
     }
 
-    static void Frame(void* queue, int index) {
+    static void Frame(int index) {
         PollInput();
         State st = s_State.load();
         if (st == State::Draining) {
@@ -819,7 +966,47 @@ namespace sl::app {
             P.PoolFlushMappedRange(&s_PixPool, (ptrdiff_t)(first * stride), (last - first + 1) * stride);
         }
         int dx = cx + (cw - s_PixW) / 2, dy = cy + (ch - s_PixH) / 2;
-        SubmitCopy(queue, tex, dx, dy);
+        CopyPanel(tex, dx, dy);
+    }
+
+    /* ---- the phone icon's gyroid, animated like the menu's ----
+       The icon texture (found by IconTextureInit) gets the matching pre-made frame copied in whenever
+       the animation step changes, a few times a second. Frame data: icon_frames.inc, decoded into a
+       GPU-visible pool the first time. */
+
+    static bool InitIcon() {
+        if (s_IconState) return s_IconState > 0;
+        s_IconState = -1;
+        if (!InitCmd()) return false;
+        s_IconMem = static_cast<u8*>(s_Alloc(0x1000, IconBytes));
+        if (!s_IconMem) { Log("app: out of memory for the icon frames"); return false; }
+        for (size_t k = 0; k < (size_t)IconFrameCount * IconFrameBytes; k++)
+            s_IconMem[k] = (u8)(HexNibble(k_IconFrames[2 * k]) << 4 | HexNibble(k_IconFrames[2 * k + 1]));
+        if (!InitPool(s_IconPool, s_IconMem, IconBytes, PoolCpuCached | PoolGpuUncached) &&
+            !InitPool(s_IconPool, s_IconMem, IconBytes, PoolCpuCached | PoolGpuCached)) {
+            Log("app: could not create the icon memory pool");
+            return false;
+        }
+        P.PoolFlushMappedRange(&s_IconPool, 0, IconBytes);
+        s_IconAddr = P.PoolGetBufferAddress(&s_IconPool);
+        if (!s_IconAddr) return false;
+        s_IconState = 1;
+        Log("app: phone icon animation ready");
+        return true;
+    }
+
+    static void IconTick() {
+        void* tex = s_IconTex.load(std::memory_order_acquire);
+        if (!tex) { s_IconShown = -1; return; }
+        int step = BobNow();
+        int frame = PoseOf(step) * IconHops + HopOf(step);
+        if (frame == s_IconShown || frame >= IconFrameCount) return;
+        if (!InitIcon()) return;
+        CmdBegin();
+        P.CmdSetCopyRowStride(&s_Cmd, (IconSize + 4) / 5 * 16);   /* one row of 5x4 blocks */
+        NvnCopyRegion reg = { 0, 0, 0, IconSize, IconSize, 1 };
+        P.CmdCopyBufferToTexture(&s_Cmd, s_IconAddr + (u64)frame * IconFrameBytes, tex, nullptr, &reg, 0);
+        s_IconShown = frame;
     }
 
     static void Present(void* queue, void* window, int index) {
@@ -829,7 +1016,9 @@ namespace sl::app {
                 P.TextureGetWidth(t), P.TextureGetHeight(t), P.TextureGetFormat(t),
                 s_Crop[0], s_Crop[1], s_Crop[2], s_Crop[3], s_OriginMode);
         }
-        if (s_State.load(std::memory_order_acquire) != State::Closed) Frame(queue, index);
+        if (s_State.load(std::memory_order_acquire) != State::Closed) Frame(index);
+        if (s_IconAnimate && s_IconTex.load(std::memory_order_relaxed)) IconTick();
+        CmdSubmit(queue);
         s_RealPresent(queue, window, index);
     }
 
@@ -848,9 +1037,7 @@ namespace sl::app {
         if (!s_PixMem) {
             if (!s_Alloc) return no("no allocator");
             s_PixMem = static_cast<u8*>(s_Alloc(0x1000, PixBytes));
-            s_CmdMem = static_cast<u8*>(s_Alloc(0x1000, CmdSlots * CmdSlotBytes));
-            s_CtlMem = static_cast<u8*>(s_Alloc(0x1000, CmdSlots * CtlSlotBytes));
-            if (!s_PixMem || !s_CmdMem || !s_CtlMem) {
+            if (!s_PixMem) {
                 s_Broken = true;
                 return no("out of memory");
             }

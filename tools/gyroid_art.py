@@ -67,12 +67,13 @@ def write_inc(frames, path, source):
     open(path, 'w').write('\n'.join(out))
 
 
-def read_inc(path):
-    """-> (rows of frame 0, palette) for phone_icon.py."""
+def read_inc(path, frame=0):
+    """-> (rows of a frame, palette) for phone_icon.py."""
     text = open(path).read()
     pal = [tuple(int(v) for v in m) for m in re.findall(r'\{ (\d+), (\d+), (\d+) \}', text)]
     h = int(re.search(r'GyroidH = (\d+)', text).group(1))
-    rows = re.findall(r'^        "([.0-9a-f]+)",$', text, re.M)[:h]
+    rows = re.findall(r'^        "([.0-9a-f]+)",$', text, re.M)
+    rows = rows[frame * h:(frame + 1) * h] or rows[:h]
     return rows, pal
 
 

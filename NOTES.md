@@ -89,6 +89,15 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   up 1 sprite pixels), and the arm pose (frames 0 / 1 of `gyroid_sprite.inc`, left arm down + right up
   or the other way round) swaps every hop. When only the animation changes, just its patch of the header
   is redrawn and flushed (`RedrawGyroid`); a PC check showed it matches a full redraw for every step.
+- Phone icon animation: the module also wraps `nvnMemoryPoolBuilderSetStorage` / `nvnMemoryPoolInitialize`
+  / `Finalize` and `nvnTextureBuilderSetStorage` / `nvnTextureInitialize` / `Finalize`. Pools up to 16 MB are
+  scanned (before init) for two ASTC blocks of the romfs icon (`k_IconSig`; block-linear tiling keeps
+  16-byte blocks whole); a 180x180 texture created within 64 KB before them is the icon. While it exists,
+  each animation step change copies the matching frame (`icon_frames.inc`, 6 frames = 3 hops x 2 arm
+  poses, from `phone_icon.py --frames`; frame 0 = the romfs icon) into it with
+  `nvnCommandBufferCopyBufferToTexture` (row stride 36 x 16 bytes). Base mip level only. The copies share
+  one recording per frame with the panel. A PC test tiled the icon at block heights 1-16 into random
+  data: found every time, no false match. Needs the rebuilt romfs (old icons have no signature).
 - Header: "Gyroid's menu", watermark "made by saiplatano" with the gyroid from `gyroid_sprite.inc`
   (any size; drawn about 48 units tall in whole pixels). `tools/gyroid_art.py <picture> <inc> [height]`
   turns a picture into it; the phone icon (`phone_icon.py`) draws the same sprite on a clay tile. The
