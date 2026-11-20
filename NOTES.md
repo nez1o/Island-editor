@@ -89,12 +89,14 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   up 1 sprite pixels), and the arm pose (frames 0 / 1 of `gyroid_sprite.inc`, left arm down + right up
   or the other way round) swaps every hop. When only the animation changes, just its patch of the header
   is redrawn and flushed (`RedrawGyroid`); a PC check showed it matches a full redraw for every step.
+- Blink: sprite frame 2 (pose 0, eyes shut) replaces the first rest step of loops 0 and 2 of every 5
+  (every 3.2 / 4.8 s); the icon has a matching 7th frame. `BobNow()` returns step + 8 while blinking.
 - Phone icon animation: the module also wraps `nvnMemoryPoolBuilderSetStorage` / `nvnMemoryPoolInitialize`
   / `Finalize` and `nvnTextureBuilderSetStorage` / `nvnTextureInitialize` / `Finalize`. Pools up to 16 MB are
   scanned (before init) for two ASTC blocks of the romfs icon (`k_IconSig`; block-linear tiling keeps
   16-byte blocks whole); a 180x180 texture created within 64 KB before them is the icon. While it exists,
-  each animation step change copies the matching frame (`icon_frames.inc`, 6 frames = 3 hops x 2 arm
-  poses, the music notes bouncing in counter-time; from `phone_icon.py --frames`; frame 0 = the romfs icon) into it with
+  each animation step change copies the matching frame (`icon_frames.inc`, 7 frames = 3 hops x 2 arm
+  poses + 1 blink, the music notes bouncing in counter-time; from `phone_icon.py --frames`; frame 0 = the romfs icon) into it with
   `nvnCommandBufferCopyBufferToTexture` (row stride 36 x 16 bytes). Base mip level only. The copies share
   one recording per frame with the panel. A PC test tiled the icon at block heights 1-16 into random
   data: found every time, no false match. Needs the rebuilt romfs (old icons have no signature).

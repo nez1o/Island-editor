@@ -44,13 +44,14 @@ def _inked(layer, ink):
     out.alpha_composite(layer)
     return out
 
-def draw_icon(size=180, hop=0, pose=0):
-    """hop: sprite pixels up (0-2), pose: arm pose (sprite frame). hop 0 / pose 0 is the romfs icon."""
+def draw_icon(size=180, hop=0, pose=0, blink=False):
+    """hop: sprite pixels up (0-2), pose: arm pose (sprite frame), blink: eyes shut (pose 0 only).
+    hop 0 / pose 0 is the romfs icon."""
     import os, sys
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
     import gyroid_art
-    rows, pal = gyroid_art.read_inc(os.path.join(here, '..', 'source', 'program', 'gyroid_sprite.inc'), pose)
+    rows, pal = gyroid_art.read_inc(os.path.join(here, '..', 'source', 'program', 'gyroid_sprite.inc'), 2 if blink else pose)
     keys = '123456789abcdef'
     def gyroid_colour(ch):
         return None if ch == '.' else tuple(pal[keys.index(ch)]) + (255,)
@@ -169,7 +170,7 @@ def decode_image(data, w, h):
 # ---------------------------------------------------------------- animation frames for the module
 # The module finds the icon texture once the game loads it (by two of its ASTC blocks, which tiling keeps
 # whole) and copies these frames in, so the phone's gyroid hops and flaps like the menu's. Frame
-# pose * 3 + hop; frame 0 is exactly the romfs icon.
+# pose * 3 + hop, then one blink frame (resting, eyes shut); frame 0 is exactly the romfs icon.
 ICON_HOPS, ICON_POSES = 3, 2
 
 def write_frames(path):
@@ -179,6 +180,8 @@ def write_frames(path):
             data, bw, bh = encode_image(draw_icon(180, hop, pose))
             frames.append(data)
             print('frame', len(frames) - 1, 'hop', hop, 'pose', pose)
+    frames.append(encode_image(draw_icon(180, 0, 0, blink=True))[0])   # last frame: resting, eyes shut
+    print('frame', len(frames) - 1, 'blink')
     blocks = [frames[0][i:i + 16] for i in range(0, len(frames[0]), 16)]
     # signature: the two most "busy" blocks that occur once in the icon and are not solid (void) blocks
     def busy(b): return len(set(b))
