@@ -200,13 +200,16 @@ namespace sl::app {
     static const Fonts k_Fonts2 = { &k_Font_Title_2, &k_Font_Body_2, &k_Font_Small_2 };
 
     struct Rgb { u8 r, g, b; };
-    constexpr Rgb ColBorder = { 112, 84, 182 }, ColBg = { 252, 249, 240 }, ColHeaderTop = { 150, 118, 224 },
-                  ColHeaderBottom = { 124, 94, 202 }, ColTitle = { 255, 255, 255 }, ColSubtitle = { 228, 218, 252 },
-                  ColText = { 84, 66, 52 }, ColDim = { 146, 128, 112 }, ColSelect = { 255, 236, 166 },
-                  ColLine = { 236, 230, 216 }, ColOn = { 86, 184, 118 }, ColOff = { 224, 220, 210 },
-                  ColOffText = { 136, 126, 116 }, ColValue = { 124, 94, 202 }, ColTrack = { 236, 230, 216 },
-                  ColThumb = { 196, 182, 160 }, ColFooter = { 244, 239, 226 }, ColKey = { 84, 66, 52 },
-                  ColWhite = { 255, 255, 255 };
+    /* Animal Crossing look: cream paper with faint dots, leaf-green header, the yellow cursor,
+       teal switches, warm brown text. */
+    constexpr Rgb ColBorder = { 150, 116, 74 }, ColBg = { 250, 244, 226 }, ColDots = { 243, 234, 208 },
+                  ColHeaderTop = { 124, 204, 118 }, ColHeaderBottom = { 82, 170, 96 }, ColTitle = { 255, 255, 255 },
+                  ColSubtitle = { 226, 246, 214 }, ColText = { 114, 90, 62 }, ColDim = { 160, 138, 106 },
+                  ColSelect = { 255, 226, 100 }, ColSelectEdge = { 242, 192, 58 }, ColLine = { 236, 226, 200 },
+                  ColOn = { 56, 186, 160 }, ColOff = { 232, 222, 198 }, ColOffSel = { 246, 214, 120 },
+                  ColOffText = { 150, 130, 100 }, ColValue = { 242, 140, 66 }, ColArrow = { 255, 226, 190 },
+                  ColTrack = { 238, 228, 204 }, ColThumb = { 202, 170, 118 }, ColFooter = { 242, 232, 206 },
+                  ColKey = { 114, 90, 62 }, ColWhite = { 255, 255, 255 };
 
     /* ---------------------------------------------------------------- CPU drawing */
 
@@ -435,15 +438,22 @@ namespace sl::app {
     /* The game stopped reading the controller (loading, sleep...): nothing could close the panel. */
     static bool InputStalled() { return Ticks() - s_LastInputTick > TickFreq() * 2; }
 
-    /* Held direction with key repeat. */
-    struct Repeat { u64 next = 0; };
-    static bool Fire(u64 mask, Repeat& r) {
+    /* Held direction with key repeat, quick: first repeat after 0.2 s, then every 50 ms, and every
+       25 ms once held for a second. Returns how many steps to take this frame (the game runs at
+       30 fps, so a fast repeat can be more than one step per frame). */
+    struct Repeat { u64 next = 0, start = 0; };
+    static int Fire(u64 mask, Repeat& r) {
         bool held = s_Held & mask, was = s_PrevHeld & mask;
-        if (!held) return false;
+        if (!held) return 0;
         u64 now = Ticks(), f = TickFreq();
-        if (!was) { r.next = now + f * 35 / 100; return true; }
-        if (now >= r.next) { r.next = now + f * 8 / 100; return true; }
-        return false;
+        if (!was) { r.start = now; r.next = now + f / 5; return 1; }
+        int steps = 0;
+        while (now >= r.next && steps < 4) {
+            r.next += now - r.start > f ? f / 40 : f / 20;
+            steps++;
+        }
+        if (steps == 4 && now >= r.next) r.next = now;   /* don't pile up after a hitch */
+        return steps;
     }
 
     static bool Pressed(u64 mask) { return (s_Held & mask) && !(s_PrevHeld & mask); }
@@ -453,17 +463,17 @@ namespace sl::app {
         int count = AppRowCount();
         if (count <= 0) return;
         int sel = s_Sel;
-        if (Fire(BtnUp, up)) sel = sel > 0 ? sel - 1 : (Pressed(BtnUp) ? count - 1 : 0);
-        if (Fire(BtnDown, down)) sel = sel < count - 1 ? sel + 1 : (Pressed(BtnDown) ? 0 : count - 1);
+        for (int n = Fire(BtnUp, up); n > 0; n--) sel = sel > 0 ? sel - 1 : (Pressed(BtnUp) ? count - 1 : 0);
+        for (int n = Fire(BtnDown, down); n > 0; n--) sel = sel < count - 1 ? sel + 1 : (Pressed(BtnDown) ? 0 : count - 1);
         if (Fire(BtnL, pgUp)) sel = sel - VisibleRows < 0 ? 0 : sel - VisibleRows;
         if (Fire(BtnR, pgDown)) sel = sel + VisibleRows >= count ? count - 1 : sel + VisibleRows;
         if (sel != s_Sel) { s_Sel = sel; s_Dirty = true; }
         AppRow row;
         AppRowGet(s_Sel, &row);
-        bool isValue = row.value;
         if (Pressed(BtnA)) { AppRowChange(s_Sel, 0); s_Dirty = true; }
-        if (isValue ? Fire(BtnLeft, left) : Pressed(BtnLeft)) { AppRowChange(s_Sel, -1); s_Dirty = true; }
-        if (isValue ? Fire(BtnRight, right) : Pressed(BtnRight)) { AppRowChange(s_Sel, 1); s_Dirty = true; }
+        int l = row.value ? Fire(BtnLeft, left) : Pressed(BtnLeft), r = row.value ? Fire(BtnRight, right) : Pressed(BtnRight);
+        for (; l > 0; l--) { AppRowChange(s_Sel, -1); s_Dirty = true; }
+        for (; r > 0; r--) { AppRowChange(s_Sel, 1); s_Dirty = true; }
         if (Pressed(BtnB)) {
             s_State.store(State::Draining);
             Log("app: closed");
@@ -481,12 +491,12 @@ namespace sl::app {
         if (target > maxScroll) target = maxScroll;
         if (target < 0) target = 0;
         float d = target - s_ScrollPx;
-        if (d > -0.5f && d < 0.5f) {
+        if (d > -1.0f && d < 1.0f) {
             if (s_ScrollPx == target) return false;
             s_ScrollPx = target;
             return true;
         }
-        s_ScrollPx += d * 0.4f;
+        s_ScrollPx += d * 0.7f;   /* snappy glide: there in about 3 frames */
         return true;
     }
 
@@ -494,7 +504,7 @@ namespace sl::app {
 
     static void DrawSwitch(int right, int y, bool on, bool sel) {
         int w = U(62), h = U(28), x = right - w, top = y + (U(RowH) - h) / 2;
-        FillRound(x, top, w, h, h / 2, on ? ColOn : sel ? Rgb{ 238, 224, 176 } : ColOff);
+        FillRound(x, top, w, h, h / 2, on ? ColOn : sel ? ColOffSel : ColOff);
         DrawText(s_F->small, x + w / 2, top + (h + s_F->small->ascent * 7 / 10) / 2, on ? "ON" : "OFF",
                  on ? ColWhite : ColOffText, 0, 1);
     }
@@ -510,8 +520,8 @@ namespace sl::app {
         int base = top + (h + s_F->small->ascent * 7 / 10) / 2;
         DrawText(s_F->small, x + w / 2, base, buf, ColWhite, 0, 1);
         if (sel) {
-            DrawText(s_F->small, x + U(14), base, "<", ColSubtitle, 0, 1);
-            DrawText(s_F->small, x + w - U(14), base, ">", ColSubtitle, 0, 1);
+            DrawText(s_F->small, x + U(14), base, "<", ColArrow, 0, 1);
+            DrawText(s_F->small, x + w - U(14), base, ">", ColArrow, 0, 1);
         }
     }
 
@@ -549,6 +559,13 @@ namespace sl::app {
         DrawText(s_F->title, U(26), U(42), "Slumber", ColTitle);
         DrawText(s_F->small, W - U(26), U(40), "SlumberToggle v0.61", ColSubtitle, 0, 2);
 
+        /* faint polka dots on the paper, like the game's menus */
+        s_ClipY0 = U(HeaderH); s_ClipY1 = U(FooterTop);
+        for (int gy = 0, yy = HeaderH + 12; yy < FooterTop; yy += 16, gy++)
+            for (int xx = 14 + (gy & 1) * 8; xx < PanelW - 8; xx += 16)
+                FillRound(U(xx) - U(2), U(yy) - U(2), U(4), U(4), U(2), ColDots);
+        s_ClipY0 = 0; s_ClipY1 = H;
+
         /* list */
         int count = AppRowCount();
         bool bar = count > VisibleRows;
@@ -560,7 +577,10 @@ namespace sl::app {
             AppRowGet(i, &row);
             int y = U(ListTop + i * RowH - s_ScrollPx);
             bool sel = i == s_Sel;
-            if (sel) FillRound(U(12), y + U(3), right + U(10) - U(12), U(RowH - 6), U(12), ColSelect);
+            if (sel) {   /* the game's yellow cursor: darker rim, bright fill */
+                FillRound(U(12), y + U(3), right + U(10) - U(12), U(RowH - 6), U(14), ColSelectEdge);
+                FillRound(U(12) + b, y + U(3) + b, right + U(10) - U(12) - 2 * b, U(RowH - 6) - 2 * b, U(14) - b, ColSelect);
+            }
             else if (i + 1 < count && i + 1 != s_Sel && ListTop + (i + 1) * RowH - s_ScrollPx < ListBottom - 1) FillRect(U(26), y + U(RowH) - 1, right - U(26), b > 1 ? 2 : 1, ColLine);
             int ctl = row.value ? U(104) : U(62);
             DrawText(s_F->body, U(28), y + U(29), row.label, ColText, right - ctl - U(16) - U(28));
