@@ -85,6 +85,9 @@ draws itself: no game UI scene and no offsets in main, only SDK exports.
   or memory can't be allocated; the reason is logged. The romfs talk menu is still needed for that.
 - Gyroid sprite: hand-placed after a City Folk gyroid picture in `tools/gyroid_design.py` (24x25, eye
   sparkles + blush), which writes `gyroid_sprite.inc`.
+- The header gyroid bobs one sprite pixel up / down (1.6 s loop: rest, up, rest, down). When only the
+  bob changes, just its patch of the header is redrawn and flushed (`RedrawGyroid`), not the panel; a
+  PC check showed the patch redraw matches a full redraw pixel for pixel.
 - Header: "Gyroid's menu", watermark "made by saiplatano" with the gyroid from `gyroid_sprite.inc`
   (any size; drawn about 48 units tall in whole pixels). `tools/gyroid_art.py <picture> <inc> [height]`
   turns a picture into it; the phone icon (`phone_icon.py`) draws the same sprite on a clay tile. The

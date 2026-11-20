@@ -219,6 +219,7 @@ namespace sl::app {
     static bool s_Flip = false, s_Bgr = false;
     static const Fonts* s_F = &k_Fonts1;
     static int s_ClipY0 = 0, s_ClipY1 = 0;
+    static int s_ClipX0 = 0, s_ClipX1 = 1 << 30;
 
     static int U(float v) { return (int)(v * s_Scale + (v >= 0 ? 0.5f : -0.5f)); }
 
@@ -245,7 +246,9 @@ namespace sl::app {
 
     static void FillRect(int x, int y, int w, int h, Rgb col) {
         u32 c = Pack(col);
-        int x0 = x < 0 ? 0 : x, x1 = x + w > s_PixW ? s_PixW : x + w;
+        int x0 = x < s_ClipX0 ? s_ClipX0 : x, x1 = x + w > s_ClipX1 ? s_ClipX1 : x + w;
+        if (x0 < 0) x0 = 0;
+        if (x1 > s_PixW) x1 = s_PixW;
         for (int yy = y; yy < y + h; yy++) {
             if (!ClipRow(yy)) continue;
             u32* r = Row(yy);
@@ -264,7 +267,7 @@ namespace sl::app {
             float cy = yy + 0.5f;
             float dy = cy < y + rad ? (y + rad) - cy : cy > y + h - rad ? cy - (y + h - rad) : 0.0f;
             for (int xx = x; xx < x + w; xx++) {
-                if (xx < 0 || xx >= s_PixW) continue;
+                if (xx < 0 || xx >= s_PixW || xx < s_ClipX0 || xx >= s_ClipX1) continue;
                 float cx = xx + 0.5f;
                 float dx = cx < x + rad ? (x + rad) - cx : cx > x + w - rad ? cx - (x + w - rad) : 0.0f;
                 if (dx == 0.0f && dy == 0.0f) { r[xx] = c; continue; }
@@ -554,16 +557,14 @@ namespace sl::app {
         }
     }
 
-    static void Render() {
-        s_ClipY0 = 0; s_ClipY1 = s_PixH;
-        int W = s_PixW, H = s_PixH;
-        /* frame + background */
-        FillRect(0, 0, W, H, ColBorder);
-        int b = U(BorderW) < 1 ? 1 : U(BorderW);
-        FillRound(b, b, W - 2 * b, H - 2 * b, U(PanelRadius) - b, ColBg);
-        /* header: vertical gradient, clipped to the inner rounded shape at the top */
-        int hh = U(HeaderH);
+    /* Header background (gradient inside the panel's rounded top) for rows [y0, y1). */
+    static int BorderPx() { return U(BorderW) < 1 ? 1 : U(BorderW); }
+
+    static void DrawHeader(int y0, int y1) {
+        int b = BorderPx(), hh = U(HeaderH), W = s_PixW;
+        int c0 = s_ClipY0, c1 = s_ClipY1;
         for (int y = b; y < hh; y++) {
+            if (y < y0 || y >= y1) continue;
             float t = (float)(y - b) / (float)(hh - b);
             Rgb c = { (u8)(ColHeaderTop.r + (ColHeaderBottom.r - ColHeaderTop.r) * t),
                       (u8)(ColHeaderTop.g + (ColHeaderBottom.g - ColHeaderTop.g) * t),
@@ -571,13 +572,53 @@ namespace sl::app {
             s_ClipY0 = y; s_ClipY1 = y + 1;
             FillRound(b, b, W - 2 * b, hh * 2, U(PanelRadius) - b, c);
         }
-        s_ClipY0 = 0; s_ClipY1 = H;
+        s_ClipY0 = c0; s_ClipY1 = c1;
+    }
+
+    /* Where the gyroid sits at rest; it bobs one of its own pixels up and down from there. */
+    struct GyroidBox { int x, y, px; };
+    static int s_Bob = 0;   /* -1 up, 0, +1 down (in sprite pixels) */
+
+    static GyroidBox GyroidPlace() {
+        int px = U(54) / GyroidH < 2 ? 2 : U(54) / GyroidH;   /* fills most of the header, whole pixels */
+        int b = BorderPx(), hh = U(HeaderH);
+        return { s_PixW - U(24) - GyroidW * px, (hh + b - GyroidH * px) / 2, px };
+    }
+
+    /* Bob phase from the clock: a 1.6 s loop of rest, up, rest, down. */
+    static int BobNow() {
+        u64 period = TickFreq() * 16 / 10;
+        int quarter = (int)((Ticks() % period) * 4 / period);
+        return quarter == 1 ? -1 : quarter == 3 ? 1 : 0;
+    }
+
+    /* Redraws only the gyroid's patch of the header; returns the canvas rows touched. */
+    static void RedrawGyroid(int* rowFirst, int* rowLast) {
+        GyroidBox box = GyroidPlace();
+        int x0 = box.x, x1 = box.x + GyroidW * box.px;
+        int y0 = box.y - box.px, y1 = box.y + (GyroidH + 1) * box.px;
+        s_ClipX0 = x0; s_ClipX1 = x1; s_ClipY0 = y0; s_ClipY1 = y1;
+        DrawHeader(y0, y1);
+        DrawGyroid(box.x, box.y + s_Bob * box.px, box.px);
+        s_ClipX0 = 0; s_ClipX1 = 1 << 30; s_ClipY0 = 0; s_ClipY1 = s_PixH;
+        int a = s_Flip ? s_PixH - y1 : y0, z = s_Flip ? s_PixH - 1 - y0 : y1 - 1;
+        *rowFirst = a < 0 ? 0 : a;
+        *rowLast = z >= s_PixH ? s_PixH - 1 : z;
+    }
+
+    static void Render() {
+        s_ClipY0 = 0; s_ClipY1 = s_PixH;
+        int W = s_PixW, H = s_PixH;
+        /* frame + background */
+        FillRect(0, 0, W, H, ColBorder);
+        int b = BorderPx();
+        FillRound(b, b, W - 2 * b, H - 2 * b, U(PanelRadius) - b, ColBg);
+        DrawHeader(0, H);
         DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
-        int px = U(54) / GyroidH < 2 ? 2 : U(54) / GyroidH;   /* fills most of the header, whole pixels */
-        int gx = W - U(24) - GyroidW * px, gy = (hh + b - GyroidH * px) / 2;
-        DrawGyroid(gx, gy, px);
-        DrawText(s_F->small, gx - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
+        GyroidBox box = GyroidPlace();
+        DrawGyroid(box.x, box.y + s_Bob * box.px, box.px);
+        DrawText(s_F->small, box.x - U(10), U(40), "made by saiplatano", ColSubtitle, 0, 2);
 
         /* faint polka dots on the paper, like the game's menus */
         s_ClipY0 = U(HeaderH); s_ClipY1 = U(FooterTop);
@@ -760,10 +801,18 @@ namespace sl::app {
         }
         if (s_PixW > cw || s_PixH > ch) return;
         if (StepScroll()) s_Dirty = true;
+        int bob = BobNow();
         if (s_Dirty) {
             s_Dirty = false;
+            s_Bob = bob;
             Render();
             P.PoolFlushMappedRange(&s_PixPool, 0, (size_t)s_PixW * s_PixH * 4);
+        } else if (bob != s_Bob) {   /* the gyroid bobs: redraw just its patch */
+            s_Bob = bob;
+            int first, last;
+            RedrawGyroid(&first, &last);
+            size_t stride = (size_t)s_PixW * 4;
+            P.PoolFlushMappedRange(&s_PixPool, (ptrdiff_t)(first * stride), (last - first + 1) * stride);
         }
         int dx = cx + (cw - s_PixW) / 2, dy = cy + (ch - s_PixH) / 2;
         SubmitCopy(queue, tex, dx, dy);
