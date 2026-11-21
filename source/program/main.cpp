@@ -1590,6 +1590,22 @@ namespace sl {
         Log("bridges: menu tab %d", *reinterpret_cast<s32*>(menu + MenuTabIndex));
     }
 
+    constexpr u32 MenuGridCount = 0x1c1f0;
+    constexpr u32 BridgeCells   = 8;
+
+    /* 0x340de50 (fill the grid for the current tab; tabs 0-4 set the item count at +0x1c1f0,
+       other tabs keep it): the Bridges tab has one cell per bridge material. */
+    void HomeGridFill(u8* menu) {
+        if (!menu || !EditorMap() || *reinterpret_cast<s32*>(menu + MenuTabIndex) != BridgeTab) return;
+        *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
+    }
+
+    /* 0x340cf90 (a list page scrolled into view: requests the 3D captures of the visible items).
+       Skipped on the Bridges tab, which has no house parts to capture. */
+    bool HomeGridCaptureSkip(u8* menu) {
+        return menu && EditorMap() && *reinterpret_cast<s32*>(menu + MenuTabIndex) == BridgeTab;
+    }
+
     bool BridgeTabOpen() {
         return s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(s_HomeMenu + MenuTabIndex) == BridgeTab;
     }
@@ -2576,6 +2592,22 @@ HOOK_DEFINE_TRAMPOLINE(HomeTabChanged) {
     }
 };
 
+/* House menu: fill the grid for the current tab. */
+HOOK_DEFINE_TRAMPOLINE(HomeGridFill) {
+    static void Callback(u8* menu, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        sl::HomeGridFill(menu);
+        Orig(menu, a1, a2, a3, a4, a5, a6, a7);
+    }
+};
+
+/* House menu: a page of the list came into view (captures of the visible items). */
+HOOK_DEFINE_TRAMPOLINE(HomeGridPage) {
+    static void Callback(u8* menu, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        if (sl::HomeGridCaptureSkip(menu)) return;
+        Orig(menu, a1, a2, a3, a4, a5, a6, a7);
+    }
+};
+
 /* Cliff tool's land decision (its only caller is the tool): obj +0x28 = action. */
 HOOK_DEFINE_TRAMPOLINE(CliffDecision) {
     static u32 Callback(u8* obj, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
@@ -2793,6 +2825,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     TabStripInit::InstallAtOffset(0x30358c0);
     TabButtonIcon::InstallAtOffset(0x3033694);
     HomeTabChanged::InstallAtOffset(0x340b120);
+    HomeGridFill::InstallAtOffset(0x340de50);
+    HomeGridPage::InstallAtOffset(0x340cf90);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
     CliffReadyExec::InstallAtOffset(0x229dcd8);
