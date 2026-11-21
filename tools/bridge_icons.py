@@ -192,6 +192,35 @@ def zen_red():
 ICONS = [log_bridge(), suspension(), stone(), wooden(), brick(), iron(), zen_plain(), zen_red()]
 
 
+def tab_icon(size=128, ss=4):
+    """The Bridges tab's icon for the house menu: a white arched-bridge silhouette (0-255 mask,
+    like the game's IconCat* textures, which the layout tints)."""
+    N = size * ss
+    def deck_y(x):   # top of the deck at x (arch)
+        t = (x - 0.06 * N) / (0.88 * N)
+        return N * (0.70 - 0.20 * math.sin(math.pi * max(0.0, min(1.0, t))))
+    def inside(x, y):
+        if 0.06 * N <= x <= 0.94 * N:
+            top = deck_y(x)
+            if top <= y <= top + 0.15 * N: return True                       # deck
+            rail = top - 0.30 * N
+            if 0.12 * N <= x <= 0.88 * N and rail <= y <= rail + 0.10 * N: return True   # top rail
+            for k in range(5):                                                # posts
+                px = 0.125 * N + k * 0.175 * N
+                if px <= x <= px + 0.085 * N and rail <= y <= top: return True
+        for lx in (0.20, 0.71):                                               # legs into the water
+            if lx * N <= x <= (lx + 0.09) * N and deck_y(x) <= y <= 0.94 * N: return True
+        return False
+    img = []
+    for y in range(size):
+        row = []
+        for x in range(size):
+            c = sum(inside(x * ss + i + 0.5, y * ss + j + 0.5) for i in range(ss) for j in range(ss))
+            row.append(round(255 * c / (ss * ss)))
+        img.append(row)
+    return img
+
+
 def write_inc(path):
     pal = []
     for g in ICONS:

@@ -11,6 +11,8 @@
 #         those flag reads/writes and flips the matching feature (see main.cpp)
 #   Layout/LMenuDeviceBtn.Nin_NX_NVN.zs   the phone app icon (see phone_icon.py), same file size
 #   Stage/Game/MainField.byml   the Slumber HUD as a resident UI scene of the main island (stage_hud.py)
+#   Layout/WherearenIslandsCustomHome, LWherearenIslandsCustomHomeCatBtn, Message/String_<lang>:
+#       the island editor's "Bridges" tab in the HHP house menu (bridges_tab.py)
 #
 # usage: build_romfs.py <RomFS dir> <base Player_ConstructionLicenseApp.bfevfl> <out romfs dir>
 #                       [<Aden Modmenu romfs dir> <out dir for Aden-merged copies>]
@@ -536,11 +538,13 @@ if ADEN_ROMFS:
     for lang in ('USen', 'EUen'):
         build_layout_messages(lang, ADEN_ROMFS, ADEN_OUT)
         layout_msg_size[lang] = max(layout_msg_size[lang], decompressed_size(os.path.join(ADEN_OUT, 'Message', 'LayoutMsg_%s.sarc.zs' % lang)))
-build_rstb({
+import bridges_tab   # the Bridges tab of the HHP house menu (island editor)
+bridges_sizes = bridges_tab.build(ROMFS, OUT, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read, msbt_write)
+build_rstb(dict(bridges_sizes, **{
     'Layout/LMenuDeviceBtn.Nin_NX_NVN': phone_layout_size,
     'Message/TalkSys_USen.sarc': decompressed_size(os.path.join(OUT, 'Message', 'TalkSys_USen.sarc.zs')),
     'Message/TalkSys_EUen.sarc': decompressed_size(os.path.join(OUT, 'Message', 'TalkSys_EUen.sarc.zs')),
     'Message/LayoutMsg_USen.sarc': layout_msg_size['USen'],
     'Message/LayoutMsg_EUen.sarc': layout_msg_size['EUen'],
     'EventFlow/Player_ConstructionLicenseApp.bfevfl': os.path.getsize(os.path.join(OUT, 'EventFlow', 'Player_ConstructionLicenseApp.bfevfl')),
-})
+}))
