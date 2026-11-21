@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <type_traits>
@@ -504,10 +505,14 @@ namespace sl::app {
     static float s_ScrollPx = 0.0f;   /* in 720p units */
     static bool s_Dirty = true;
     static bool s_Broken = false;
+    enum class Page { Settings, Bridges };
+    static Page s_Page = Page::Settings;
+    static int s_BridgeSel = 0;
 
     /* Input latched by the hid hooks (any thread), consumed once per presented frame. */
     static std::atomic<u64> s_InHeld{0};
     static std::atomic<u32> s_InSeq{0};
+    static std::atomic<u64> s_GameHeld{0};   /* same, for main.cpp's game-thread checks (TakeButtons) */
     static u32 s_LastSeq = 0;
     static u64 s_Held = 0, s_PrevHeld = 0;
     static bool s_InputHooked = false;
@@ -526,6 +531,7 @@ namespace sl::app {
         NpadBase* s = reinterpret_cast<NpadBase*>(states);
         /* [0] is the newest. Disconnected controllers read as no buttons. */
         s_InHeld.fetch_or(s[0].buttons, std::memory_order_relaxed);
+        s_GameHeld.fetch_or(s[0].buttons, std::memory_order_relaxed);
         s_InSeq.fetch_add(1, std::memory_order_release);
         if (s_State.load(std::memory_order_acquire) == State::Closed) return;
         for (int i = 0; i < count && i < 16; i++) {
@@ -539,6 +545,7 @@ namespace sl::app {
     void SetFlipOverride(int flip) { s_FlipOverride = flip < 0 ? -1 : flip ? 1 : 0; }
     int FlipOverride() { return s_FlipOverride; }
     bool IsOpen() { return s_State.load() != State::Closed; }
+    uint64_t TakeButtons() { return s_GameHeld.exchange(0, std::memory_order_relaxed); }
 
 #ifdef __aarch64__
     static u64 Ticks() { u64 v; __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v)); return v; }
@@ -586,7 +593,10 @@ namespace sl::app {
 
     static void Sparkle();   /* the gyroid sparkles (header animation, below) */
 
+    static void HandleBridgeInput();
+
     static void HandleInput() {
+        if (s_Page == Page::Bridges) { HandleBridgeInput(); return; }
         static Repeat up, down, left, right, pgUp, pgDown;
         int count = AppRowCount();
         if (count <= 0) return;
@@ -612,6 +622,30 @@ namespace sl::app {
         if (Pressed(BtnB)) {
             s_State.store(State::Draining);
             Log("app: closed");
+        }
+    }
+
+    /* ---- Bridges picker (Island Editor): a grid of bridge looks, BridgeCols x BridgeRows ---- */
+    constexpr int BridgeCols = 4, BridgeRows = 2;
+
+    static void HandleBridgeInput() {
+        static Repeat up, down, left, right;
+        constexpr int n = BridgeCols * BridgeRows;
+        int sel = s_BridgeSel, col = sel % BridgeCols, row = sel / BridgeCols;
+        for (int k = Fire(BtnLeft, left); k > 0; k--) col = (col + BridgeCols - 1) % BridgeCols;
+        for (int k = Fire(BtnRight, right); k > 0; k--) col = (col + 1) % BridgeCols;
+        for (int k = Fire(BtnUp, up); k > 0; k--) row = (row + BridgeRows - 1) % BridgeRows;
+        for (int k = Fire(BtnDown, down); k > 0; k--) row = (row + 1) % BridgeRows;
+        sel = row * BridgeCols + col;
+        if (sel != s_BridgeSel && sel < n) { s_BridgeSel = sel; s_Dirty = true; }
+        if (Pressed(BtnA) && BridgeCurrent() >= 0 && s_BridgeSel != BridgeCurrent()) {
+            BridgePick(s_BridgeSel);
+            Sparkle();
+            s_Dirty = true;
+        }
+        if (Pressed(BtnB)) {
+            s_State.store(State::Draining);
+            Log("app: bridges picker closed");
         }
     }
 
@@ -831,6 +865,8 @@ namespace sl::app {
         *rowLast = z >= s_PixH ? s_PixH - 1 : z;
     }
 
+    static void RenderBridges();
+
     static void Render() {
         s_ClipY0 = 0; s_ClipY1 = s_PixH;
         int W = s_PixW, H = s_PixH;
@@ -839,13 +875,14 @@ namespace sl::app {
         int b = BorderPx();
         FillRound(b, b, W - 2 * b, H - 2 * b, U(PanelRadius) - b, ColBg);
         DrawHeader(0, H);
-        DrawText(s_F->title, U(26), U(42), "Gyroid's menu", ColTitle);
+        DrawText(s_F->title, U(26), U(42), s_Page == Page::Bridges ? "Island Editor" : "Gyroid's menu", ColTitle);
         /* watermark: "made by saiplatano" and the gyroid, right side of the header */
         GyroidBox box = GyroidPlace();
         DrawNotes(box, s_Bob);
         DrawGyroid(box.x + SwayOf(s_Bob) * box.px, box.y - HopOf(s_Bob) * box.px, box.px, SpriteFrameOf(s_Bob));
         DrawSparkles(box, s_Bob);
         DrawText(s_F->small, NotesLeft(box) - U(6), U(40), "made by saiplatano", ColSubtitle, 0, 2);
+        if (s_Page == Page::Bridges) { RenderBridges(); return; }
 
         /* faint polka dots on the paper, like the game's menus */
         s_ClipY0 = U(HeaderH); s_ClipY1 = U(FooterTop);
@@ -906,6 +943,93 @@ namespace sl::app {
         if (s_Sel < count) AppRowGet(s_Sel, &selRow);
         DrawKey(x, base, "<>", selRow.value ? "Change" : "Off / On");
         DrawText(s_F->small, U(24), base, "L / R  Page", ColDim);
+    }
+
+    /* ---- Bridges picker drawing ----
+       Like the house exterior menu: a tab strip (one tab, "Bridges", highlighted) above a grid of
+       picture cells, the yellow cursor on the selected cell and a "Now" tag on the bridge's
+       current look. Pictures: bridge_icons.inc (tools/bridge_icons.py). */
+#include "bridge_icons.inc"
+    static const char* const k_BridgeNames[BridgeIconCount] = {
+        "Log", "Suspension", "Stone", "Wooden", "Brick", "Iron", "Zen", "Red zen" };
+    constexpr int TabTop = 76, TabH = 38, GridTop = 126, CellW = 130, CellH = 140, CellGap = 8;
+    constexpr Rgb ColCell = { 255, 252, 242 }, ColCellEdge = { 232, 218, 186 }, ColTabOff = { 238, 226, 196 };
+
+    static void DrawBridgeIcon(int i, int x, int y, int px) {
+        if (i < 0 || i >= BridgeIconCount) return;
+        for (int r = 0; r < BridgeIconH; r++) {
+            const char* line = k_BridgeIcon[i][r];
+            for (int c = 0; line[c]; c++) {
+                const char* k = line[c] == '.' ? nullptr : strchr(k_BridgeKeys, line[c]);
+                if (!k) continue;
+                const uint8_t* rgb = k_BridgePalette[k - k_BridgeKeys];
+                FillRect(x + c * px, y + r * px, px, px, Rgb{ rgb[0], rgb[1], rgb[2] });
+            }
+        }
+    }
+
+    static void RenderBridges() {
+        int W = s_PixW, H = s_PixH, b = BorderPx();
+        int cur = BridgeCurrent();
+
+        /* polka dots like the settings page */
+        s_ClipY0 = U(HeaderH); s_ClipY1 = U(FooterTop);
+        for (int gy = 0, yy = HeaderH + 12; yy < FooterTop; yy += 16, gy++)
+            for (int xx = 14 + (gy & 1) * 8; xx < PanelW - 8; xx += 16)
+                FillRound(U(xx) - U(2), U(yy) - U(2), U(4), U(4), U(2), ColDots);
+        s_ClipY0 = 0; s_ClipY1 = H;
+
+        /* tab strip: the highlighted tab shows its picture and its name */
+        int gridW = BridgeCols * CellW + (BridgeCols - 1) * CellGap, left = (PanelW - gridW) / 2;
+        int tx = U(left), ty = U(TabTop), th = U(TabH);
+        int ipx = (int)(s_Scale) < 1 ? 1 : (int)(s_Scale);   /* small picture: 1 px per sprite px at 720p */
+        int tabW = U(16) + BridgeIconW * ipx + U(10) + TextWidth(s_F->body, "Bridges") + U(18);
+        FillRound(tx, ty, tabW, th, th / 2, ColSelectEdge);
+        FillRound(tx + b, ty + b, tabW - 2 * b, th - 2 * b, th / 2 - b, ColSelect);
+        DrawBridgeIcon(cur >= 0 ? cur : 0, tx + U(16), ty + (th - BridgeIconH * ipx) / 2, ipx);
+        DrawText(s_F->body, tx + U(16) + BridgeIconW * ipx + U(10), ty + th / 2 + s_F->body->ascent * 7 / 10 / 2, "Bridges", ColText);
+        const char* shape = BridgeShapeText();
+        if (shape && *shape)
+            DrawText(s_F->small, U(left + gridW), ty + th / 2 + s_F->small->ascent * 7 / 10 / 2, shape, ColDim, 0, 2);
+
+        /* picture grid */
+        int px = (int)(3.0f * s_Scale);
+        for (int i = 0; i < BridgeCols * BridgeRows && i < BridgeIconCount; i++) {
+            int cx = U(left + (i % BridgeCols) * (CellW + CellGap)), cy = U(GridTop + (i / BridgeCols) * (CellH + CellGap));
+            int cw = U(CellW), ch = U(CellH);
+            bool sel = i == s_BridgeSel;
+            FillRound(cx, cy, cw, ch, U(14), sel ? ColSelectEdge : ColCellEdge);
+            FillRound(cx + b * (sel ? 2 : 1), cy + b * (sel ? 2 : 1), cw - b * (sel ? 4 : 2), ch - b * (sel ? 4 : 2),
+                      U(14) - b, sel ? ColSelect : ColCell);
+            int iw = BridgeIconW * px, ih = BridgeIconH * px;
+            DrawBridgeIcon(i, cx + (cw - iw) / 2, cy + U(14), px);
+            DrawText(s_F->body, cx + cw / 2, cy + ch - U(16), k_BridgeNames[i], ColText, cw - U(12), 1);
+            if (i == cur) {   /* the bridge's look now */
+                int nw = TextWidth(s_F->small, "Now") + U(14), nh = U(20);
+                FillRound(cx + cw - nw - U(6), cy + U(6), nw, nh, nh / 2, ColOn);
+                DrawText(s_F->small, cx + cw - U(6) - nw / 2, cy + U(6) + nh / 2 + s_F->small->ascent * 7 / 10 / 2, "Now", ColWhite, 0, 1);
+            }
+            (void)ih;
+        }
+
+        /* help line */
+        FillRect(U(20), U(HelpTop), W - U(40), 1 + (b > 1), ColLine);
+        char help[96];
+        const char* name = k_BridgeNames[s_BridgeSel % BridgeIconCount];
+        if (cur < 0) snprintf(help, sizeof help, "The picker doesn't know this bridge's type, so it can't change it.");
+        else if (s_BridgeSel == cur) snprintf(help, sizeof help, "%s: this bridge's look now.", name);
+        else snprintf(help, sizeof help, "A rebuilds this bridge as %s, same size and spot.", name);
+        DrawWrapped(s_F->small, U(28), U(HelpTop + 22), U(20), help, ColDim, W - U(56), 2);
+
+        /* footer */
+        s_ClipY0 = U(FooterTop); s_ClipY1 = H - b;
+        FillRound(b, U(FooterTop) - U(PanelRadius), W - 2 * b, H - b - U(FooterTop) + U(PanelRadius), U(PanelRadius) - b, ColFooter);
+        s_ClipY0 = 0; s_ClipY1 = H;
+        int base = U(FooterTop) + (H - b - U(FooterTop)) / 2 + s_F->small->ascent * 7 / 10 / 2;
+        int x = W - U(24);
+        DrawKey(x, base, "B", "Close");
+        DrawKey(x, base, "A", "Choose");
+        DrawText(s_F->small, U(24), base, "D-pad  Move", ColDim);
     }
 
     /* ---------------------------------------------------------------- GPU side */
@@ -1154,8 +1278,20 @@ namespace sl::app {
     void Open() {
         State expect = State::Closed;
         if (s_State.compare_exchange_strong(expect, State::Opening)) {
+            s_Page = Page::Settings;
             s_Dirty = true;
             Log("app: opened");
+        }
+    }
+
+    void OpenBridges() {
+        State expect = State::Closed;
+        if (s_State.compare_exchange_strong(expect, State::Opening)) {
+            s_Page = Page::Bridges;
+            int cur = BridgeCurrent();
+            s_BridgeSel = cur >= 0 && cur < BridgeCols * BridgeRows ? cur : 0;
+            s_Dirty = true;
+            Log("app: bridges picker opened");
         }
     }
 

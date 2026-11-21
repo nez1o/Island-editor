@@ -24,6 +24,13 @@ namespace sl {
     /* dir 0 = A pressed, -1 = left, +1 = right. Called from the render thread. */
     void AppRowChange(int index, int dir);
 
+    /* The Island Editor's Bridges picker, provided by main.cpp. Materials are the picker's
+       cells in bridge_icons.inc order (log, suspension, stone, wooden, brick, iron, zen, red zen). */
+    int  BridgeCurrent();             /* material of the bridge being edited, -1 if unknown */
+    const char* BridgeShapeText();    /* its size, e.g. "4 tiles long" (kept when the look changes) */
+    /* A on a material. Called from the render thread; the change is applied on the game thread. */
+    void BridgePick(int material);
+
 }
 
 namespace sl::app {
@@ -46,6 +53,9 @@ namespace sl::app {
     /* Game thread, when the phone app is tapped: can the screen be shown? (Else the old menu.) */
     bool Ready();
     void Open();
+    void OpenBridges();
+    /* Buttons seen by the controller hooks since the last call (game thread, once a frame). */
+    uint64_t TakeButtons();   /* the Bridges picker instead of the settings list */
     bool IsOpen();
 
 }

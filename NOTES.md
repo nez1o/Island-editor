@@ -180,6 +180,18 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   +0x50 size, +0x58 flag (bit 0 visible), +0x59 alpha, +0xb0 name. Found with read watchpoints on the
   `OneRoom_ThemeName` string in Eden (`work-tools/eden_gdb.py`; static xrefs missed this site), then a logging
   build that walked the pane tree.
+- **Bridges picker** (v0.63-test, NOT yet tested in game): in the editor, X with the cursor near a bridge
+  (and not on a house) opens the module's own panel (`slumber_app.cpp`, page `Bridges`: one "Bridges" tab
+  and a 4x2 grid of pictures from `bridge_icons.inc`, made by `tools/bridge_icons.py`, no game art). A pick
+  keeps the bridge's size and swaps its material. Bridges are building records of type 26; record +8 is the
+  bridge id = material x {3, 4, 5 long, diagonal 2.5 / 3.0 / 3.5} (NHSE's `BridgeType` numbering,
+  table `k_BridgeIds` in `main.cpp`). The record is changed in the save, then the building spawner is fed
+  it; a few frames later the old bridge (other actor of the new one's class with the same +0x174 index) is
+  deleted, or, if none is found, the new actor is deleted and the look shows after a reload. Guesses to
+  check in the log (`bridges: ...` lines): +8 really is the id, record X/Z are the bridge middle in
+  5-unit cells, the spawner handles bridges, X isn't used by the editor elsewhere. X is read from the
+  controller hooks (`app::TakeButtons`, game thread in `BridgeTick` on the frame tick). Preview: the panel
+  renders on a PC by compiling `slumber_app.cpp` with stubbed `sl::` callbacks.
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 

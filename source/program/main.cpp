@@ -1499,6 +1499,186 @@ namespace sl {
         return true;
     }
 
+    /* ---- Island editor: bridge looks (the Bridges picker) ----
+       Bridges are entries of the island's building list (save records of 20 bytes, type 26). A
+       bridge's look and size are one id (record +8, BridgeType in NHSE's naming: material x
+       {3, 4, 5 tiles long, 3 diagonal sizes}). In the editor, X with the cursor on a bridge (and
+       not on a house) opens the module's own picker (slumber_app.cpp, Bridges page); a choice keeps
+       the size and swaps the material, then the bridge is rebuilt with the island's building
+       spawner like a house. If the old bridge actor can't be told apart, the new one is removed
+       again and the new look shows from the next island load.
+       NOT YET TESTED IN GAME - guesses: record +8 holds the bridge id; the record's X/Z are the
+       bridge's middle in 5-unit cells (as for houses); the spawner builds bridges too and sets
+       +0x174 (record index) on them; X does nothing else in the editor when no house is under
+       the cursor. The log ("bridges: ...") shows what happened. */
+    constexpr s16 BridgeBuildingType = 26;
+    constexpr u32 BridgeIdOffset     = 8;
+    constexpr float BridgeReach      = 30.0f;   /* cursor within this of a bridge record's spot */
+    constexpr int BridgeMaterials    = 8, BridgeShapes = 6;
+    constexpr u64 BtnX               = 1u << 2;
+    /* [material][shape]: Log, Suspension, Stone, Wooden, Brick, Iron, Zen, Red zen (the picker's
+       order, bridge_icons.inc) x 3 / 4 / 5 long, diagonal 2.5 / 3.0 / 3.5. */
+    static const u16 k_BridgeIds[BridgeMaterials][BridgeShapes] = {
+        { 0x0e, 0x0d, 0x0f, 0x10, 0x11, 0x12 },   /* log */
+        { 0x07, 0x06, 0x08, 0x09, 0x0a, 0x0b },   /* suspension */
+        { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 },   /* stone */
+        { 0x2c, 0x25, 0x2d, 0x2e, 0x2f, 0x30 },   /* wooden */
+        { 0x31, 0x26, 0x34, 0x35, 0x36, 0x37 },   /* brick */
+        { 0x27, 0x19, 0x28, 0x29, 0x2a, 0x2b },   /* iron */
+        { 0x13, 0x0c, 0x14, 0x15, 0x16, 0x17 },   /* zen ("Japanese") */
+        { 0x20, 0x18, 0x21, 0x22, 0x23, 0x24 },   /* red zen */
+    };
+    static const char* const k_BridgeShapeText[BridgeShapes] = {
+        "3 tiles long", "4 tiles long", "5 tiles long", "Diagonal, short", "Diagonal, medium", "Diagonal, long" };
+
+    static int s_BridgeRec = -1;                 /* record being edited (picker open) */
+    static std::atomic<int> s_BridgeWant{-1};    /* material picked, applied on the game thread */
+    static u64 s_EditPrevButtons = 0;
+    struct BridgeSwap { u32 idx, newH; int frames; };
+    static BridgeSwap s_BridgeSwap = { 0, 0, -1 };
+
+    static bool BridgeLook(u16 id, int* mat, int* shape) {
+        for (int m = 0; m < BridgeMaterials; m++)
+            for (int k = 0; k < BridgeShapes; k++)
+                if (k_BridgeIds[m][k] == id) { *mat = m; *shape = k; return true; }
+        return false;
+    }
+
+    static s16* BridgeRecord(int i) {
+        u8* recs = BuildingRecords();
+        if (!recs || i < 0 || i >= 47) return nullptr;
+        s16* r = reinterpret_cast<s16*>(recs + i * 0x14);
+        return r[0] == BridgeBuildingType ? r : nullptr;
+    }
+
+    int BridgeCurrent() {
+        s16* r = BridgeRecord(s_BridgeRec);
+        int m, k;
+        return r && BridgeLook(*reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset), &m, &k) ? m : -1;
+    }
+
+    const char* BridgeShapeText() {
+        s16* r = BridgeRecord(s_BridgeRec);
+        int m, k;
+        return r && BridgeLook(*reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset), &m, &k) ? k_BridgeShapeText[k] : "";
+    }
+
+    void BridgePick(int material) {
+        if (material >= 0 && material < BridgeMaterials) s_BridgeWant = material;
+    }
+
+    /* A house under the cursor gets HHP's own X (the exterior menu). */
+    static bool HouseUnder(const Vec3f& c) {
+        bool hit = false;
+        ForEachActor([&](u8* a) {
+            if (hit || VtOf(a) != BuildingBodyVt) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            if (c.x >= p->x - 20 && c.x < p->x + 20 && c.z >= p->z - 25 && c.z < p->z + 25) hit = true;
+        });
+        return hit;
+    }
+
+    static int BridgeNear(const Vec3f& c) {
+        u8* recs = BuildingRecords();
+        if (!recs) return -1;
+        int best = -1;
+        float bestD = BridgeReach * BridgeReach;
+        for (int i = 0; i < 47; i++) {
+            s16* r = reinterpret_cast<s16*>(recs + i * 0x14);
+            if (r[0] != BridgeBuildingType) continue;
+            float dx = r[1] * 5.0f - c.x, dz = r[2] * 5.0f - c.z, d = dx * dx + dz * dz;
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    static void LogRecord(const char* what, const u8* r) {
+        Log("bridges: %s %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x", what,
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]);
+    }
+
+    /* Rebuild bridge <idx> from its (changed) record. */
+    static void RespawnBridge(int idx, u16 oldId, u16 newId) {
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!field || !list) { Log("bridges: no building list - new look shows after a reload"); return; }
+        BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
+        LogRecord("list record", record.raw);
+        /* The list's record may be a copy of the save's: give it the new id too. */
+        u16* rid = reinterpret_cast<u16*>(record.raw + BridgeIdOffset);
+        if (*reinterpret_cast<s16*>(record.raw) == BridgeBuildingType && *rid == oldId) *rid = newId;
+        u32 newH = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
+        Log("bridges: spawn requested, handle %x", newH);
+        s_BridgeSwap = { (u32)idx, newH, 0 };   /* BridgeTick removes the old bridge once the new one is up */
+    }
+
+    /* A few frames after a respawn: the old bridge is the other actor of the new one's class with
+       the same record index. If there is none (or the new actor is not indexed), the new actor goes
+       instead, so there are never two bridges; the save already has the new look. */
+    static void FinishBridgeSwap() {
+        using DelFn = void (*)(u8*);
+        BridgeSwap& w = s_BridgeSwap;
+        u8* nb = ActorOfHandle(w.newH);
+        if (!nb) {
+            if (w.frames < 90) return;
+            Log("bridges: nothing spawned - new look shows after a reload");
+            w.frames = -1;
+            return;
+        }
+        u32 vt = VtOf(nb), oldH = 0;
+        bool indexed = *reinterpret_cast<u32*>(nb + ActorRecordIndex) == w.idx;
+        if (indexed)
+            ForEachActor([&](u8* a) {
+                if (!oldH && a != nb && VtOf(a) == vt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == w.idx)
+                    oldH = *reinterpret_cast<u32*>(a + 0x230);
+            });
+        Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
+        if (u8* ob = ActorOfHandle(oldH)) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
+        else {
+            reinterpret_cast<DelFn>(Main(ActorRequestDelete))(nb);
+            Log("bridges: old bridge not found - new look shows after a reload");
+        }
+        w.frames = -1;
+    }
+
+    static void ApplyBridgePick(int material) {
+        s16* r = BridgeRecord(s_BridgeRec);
+        if (!r) { Log("bridges: record %d is not a bridge any more", s_BridgeRec); return; }
+        u16* id = reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset);
+        int m, k;
+        if (!BridgeLook(*id, &m, &k)) { Log("bridges: unknown bridge id %x", *id); return; }
+        if (m == material) return;
+        u16 oldId = *id, newId = k_BridgeIds[material][k];
+        *id = newId;
+        Log("bridges: record %d id %x -> %x (%s)", s_BridgeRec, oldId, newId, k_BridgeShapeText[k]);
+        RespawnBridge(s_BridgeRec, oldId, newId);
+    }
+
+    /* Game thread, every frame: X on a bridge in the editor opens the picker; picks are applied. */
+    void BridgeTick() {
+        if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
+        if (s_BridgeSwap.frames < 0) {   /* one rebuild at a time; a pick meanwhile waits */
+            int want = s_BridgeWant.exchange(-1);
+            if (want >= 0) ApplyBridgePick(want);
+        }
+
+        u64 btn = app::TakeButtons();
+        bool xDown = (btn & BtnX) && !(s_EditPrevButtons & BtnX);
+        s_EditPrevButtons = btn;
+        if (!xDown || app::IsOpen() || !EditorMap() || !LiveLayout(s_EditLayout) || s_EditOpening || s_CursorToPlayer) return;
+        Vec3f c = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        if (HouseUnder(c)) return;
+        int i = BridgeNear(c);
+        if (i < 0) return;
+        s16* r = BridgeRecord(i);
+        LogRecord("picked", reinterpret_cast<u8*>(r));
+        if (!app::Ready()) { Log("bridges: picker can't be drawn here"); return; }
+        s_BridgeRec = i;
+        app::OpenBridges();
+    }
+
     /* 0x13ba988 (edit object of a handle) for our buildings: handle +8 type, +0x10 actor handle. */
     void* BuildingEditObject(const u8* h) {
         if (!h) return nullptr;
@@ -1872,7 +2052,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.62 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.63-test (bridges) - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2359,6 +2539,7 @@ HOOK_DEFINE_TRAMPOLINE(FrameTick) {
     static u64 Callback(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         u64 r = Orig(a0, a1, a2, a3, a4, a5, a6, a7);
         sl::BuildingTick();
+        sl::BridgeTick();
         sl::AppTick();
         return r;
     }
