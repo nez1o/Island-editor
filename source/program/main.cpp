@@ -506,6 +506,9 @@ namespace sl {
     constexpr int DiyPlusAppId         = 4;
     constexpr const char* EditorAppLabel = "0091";
     constexpr float EditorIconFrame    = 17.0f;      /* Happy Home Network's icon */
+    constexpr u32 ThemeBannerNone      = 0x345d7cc;  /* exterior menu banner: theme 0xffff -> 0 */
+    constexpr u32 ThemeBannerNoneOrig  = 0x2a1f03e2; /* mov w2, wzr */
+    constexpr u32 ThemeBannerSkip      = 0x14000014; /* b 0x345d81c (skip setting the banner text) */
 
     static u8* s_EditLayout     = nullptr;  /* FtrEditLayout of the last start-edit */
     static bool s_CursorToPlayer = false;
@@ -1525,6 +1528,11 @@ namespace sl {
                 armDCacheFlush(frame, sizeof(float));
             }
         }
+        /* HHP's exterior menu shows the vacation home's theme in a banner. Island houses have none
+           (theme 0xffff), which the game shows as theme 0, "Construction Job Site" (System
+           OneRoom_ThemeName 0000). With the editor on, the "no theme" path skips setting the text
+           (0x345d7cc "mov w2, wzr" -> b 0x345d81c); homes with a real theme never take it. */
+        SetWord(ThemeBannerNone, ThemeBannerNoneOrig, ThemeBannerSkip, on);
     }
 
     void SetEditorSlot(int slot) {

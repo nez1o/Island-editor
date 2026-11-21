@@ -169,7 +169,12 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   `0x2a3cfa0` / `0x2a3a450`. Rebuild at the new spot: spawner `0x2975a38(field+0x1e08, record, idx)`, old actor
   deleted with `0x5fb3d0` once the new body has parts (frame tick on camera apply `0x7a8414`).
 - **Exteriors** (X on a house): hooks `0x2a914b0` (get design) / `0x2a91660` (apply), save offsets for villager and
-  player houses in `main.cpp`.
+  player houses in `main.cpp`. The menu's theme banner showed "Construction Job Site" on island houses: the
+  banner code at `0x345d7bc` reads the vacation home's theme (u16 at +0xd8; 0xffff = none -> theme 0 =
+  System `OneRoom_ThemeName` label 0000) and sets it via `0x1aea210` / `0x1aea9c8`. With the editor on, the
+  "none" path is skipped (`0x345d7cc` `mov w2, wzr` -> `b 0x345d81c`), so the text stays empty (v0.62).
+  The brown plate behind it still shows. Found with read watchpoints on the `OneRoom_ThemeName` string in Eden
+  (`work-tools/eden_gdb.py`); static xrefs missed this site.
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 
