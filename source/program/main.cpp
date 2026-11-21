@@ -1485,7 +1485,10 @@ namespace sl {
     }
 
     /* 0x2a91660: apply a design chosen in the menu to the house's save data. */
+    bool BridgeTabOpen();
+
     bool HouseDesignSet(u32 handle, const u8* design) {
+        if (BridgeTabOpen()) { Log("bridges: pick on the Bridges tab ignored (grid not done yet)"); return true; }
         HouseExt e;
         if (!design || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
         const u16* d = reinterpret_cast<const u16*>(design);
@@ -1499,25 +1502,111 @@ namespace sl {
         return true;
     }
 
-    /* ---- Island editor: bridge looks (the Bridges picker) ----
+    /* ---- Island editor: a "Bridges" tab in HHP's house exterior menu ----
+       The menu (scene WherearenIslandsCustomHome, code ~0x3404000-0x3460000) has a generic tab
+       strip at menu + 0x1c260. Its tabs come from a static descriptor in .data, 0x4a33ed0
+       = { u64 count 5, entries* 0x5667308 }, entries of 0x70 bytes: +0x08 u32 kind (picks the
+       tab icon frame), +0x10 FixedSafeString<64> STR_CategoryName label (the bubble), +0x68 u8
+       shown. 0x3036870(strip, desc) builds the tabs from it; 0x30358c0(strip, params) binds
+       the tab buttons, params +0x14 = how many buttons (5, from 0x340abf0). 0x3033694(button,
+       kind) sets a tab's icon: tab type 0x16 maps the five kinds to Pattern frames 0-4.
+       The romfs (tools/bridges_tab.py) adds button L_Category_05, CategoryNum frame 5 (6 tabs),
+       Pattern frame 5 (bridge icon) and label 1290 "Bridges". Here: on the main island the menu
+       gets a 6-entry descriptor, 6 buttons, and the bridge kind shows Pattern frame 5. The menu
+       keeps its current tab at +0x1c290 and clamps it to 0-4 when it fills the grid, so for now
+       the Bridges tab shows the Shape grid and picks made there are ignored.
+       NOT YET TESTED IN GAME. */
+    constexpr u32 HomeTabDesc        = 0x4a33ed0;   /* { u64 count, entry* } */
+    constexpr u32 HomeTabEntrySize   = 0x70;
+    constexpr u32 BridgeTabKind      = 0x7f;        /* not one of the game's kinds (0x2a-0x2f) */
+    constexpr int BridgeTab          = 5;
+    constexpr u32 MenuTabIndex       = 0x1c290;
+    constexpr u32 TabBtnKind         = 0x270, TabBtnAnim = 600;
+    constexpr u32 AnimFrameQueryGot  = 0x4ac4f00;   /* vtable base of the anim query object */
+
+    struct alignas(8) HomeTabDescT { u64 count; u8* entries; };
+    alignas(16) static u8 s_HomeTabs[6 * HomeTabEntrySize];
+    static HomeTabDescT s_HomeTabDesc = { 0, nullptr };
+    static bool s_HomeTabButtons = false;   /* 0x340abf0 is binding the menu's tab buttons */
+    static u8* s_HomeMenu = nullptr;         /* the open menu (seen on a tab change) */
+
+    bool HomeTabsWanted(const void* desc) {
+        return desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && EditorMap();
+    }
+
+    /* The 6-tab descriptor: the game's five tabs, then Bridges (a copy of Roof with its own kind
+       and label). Built from the live table each time, so it follows the game's static init. */
+    const void* HomeTabs(const void* gameDesc) {
+        const HomeTabDescT* g = reinterpret_cast<const HomeTabDescT*>(gameDesc);
+        if (!g || g->count != 5 || !g->entries) return gameDesc;
+        memcpy(s_HomeTabs, g->entries, 5 * HomeTabEntrySize);
+        u8* e = s_HomeTabs + BridgeTab * HomeTabEntrySize;
+        memcpy(e, g->entries + 1 * HomeTabEntrySize, HomeTabEntrySize);
+        *reinterpret_cast<u32*>(e + 0x08) = BridgeTabKind;
+        /* FixedSafeString<64> at +0x10: vtable, char* (-> own buffer at +0x24), s32 capacity */
+        *reinterpret_cast<char**>(e + 0x18) = reinterpret_cast<char*>(e + 0x24);
+        memset(e + 0x24, 0, 0x40);
+        memcpy(e + 0x24, "1290", 5);
+        e[0x68] = 1;
+        s_HomeTabDesc = { 6, s_HomeTabs };
+        Log("bridges: menu gets 6 tabs");
+        return &s_HomeTabDesc;
+    }
+
+    void HomeTabButtonsBegin(bool on) { s_HomeTabButtons = on && EditorMap(); }
+
+    /* 0x30358c0 params while 0x340abf0 binds the tab buttons: 5 -> 6 buttons. */
+    void HomeTabButtonParams(u8* params) {
+        if (!s_HomeTabButtons || !params) return;
+        u32* n = reinterpret_cast<u32*>(params + 0x14);
+        if (*n == 5) { *n = 6; Log("bridges: 6 tab buttons"); }
+    }
+
+    /* After 0x3033694 put frame 0 on an unknown kind: the bridge kind gets Pattern frame 5
+       (same calls as the end of 0x3033694). */
+    void HomeTabIcon(u8* btn, u32 kind) {
+        if (kind != BridgeTabKind || !btn) return;
+        u8* anim = *reinterpret_cast<u8**>(btn + TabBtnAnim);
+        if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
+        struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 9, 0 };
+        using SelFn = void (*)(u8*, void*);
+        using MaxFn = float (*)(void*);
+        using SetFn = void (*)(float, void*);
+        u8* vt = *reinterpret_cast<u8**>(anim);
+        u8* ft = *reinterpret_cast<u8**>(anim + 24);
+        reinterpret_cast<SelFn>(*reinterpret_cast<uintptr_t*>(vt + 0x20))(anim, &q);
+        float max = reinterpret_cast<MaxFn>(*reinterpret_cast<uintptr_t*>(ft + 0xb0))(*reinterpret_cast<void**>(anim + 8));
+        q.id = 0x14;
+        reinterpret_cast<SelFn>(*reinterpret_cast<uintptr_t*>(vt + 0x18))(anim, &q);
+        float frame = (float)BridgeTab <= max ? (float)BridgeTab : 0.0f;
+        reinterpret_cast<SetFn>(*reinterpret_cast<uintptr_t*>(ft + 0x158))(frame, *reinterpret_cast<void**>(anim + 8));
+        Log("bridges: tab icon frame %d (anim max %d)", (int)frame, (int)max);
+    }
+
+    /* 0x340b120 (the menu's tab-changed handler): remember the menu and its tab. */
+    void HomeTabChanged(u8* menu) {
+        if (!menu || !EditorMap()) return;
+        s_HomeMenu = menu;
+        Log("bridges: menu tab %d", *reinterpret_cast<s32*>(menu + MenuTabIndex));
+    }
+
+    bool BridgeTabOpen() {
+        return s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(s_HomeMenu + MenuTabIndex) == BridgeTab;
+    }
+
+    /* ---- bridge looks (save side; the grid of the Bridges tab will call ApplyBridgePick) ----
        Bridges are entries of the island's building list (save records of 20 bytes, type 26). A
        bridge's look and size are one id (record +8, BridgeType in NHSE's naming: material x
-       {3, 4, 5 tiles long, 3 diagonal sizes}). In the editor, X with the cursor on a bridge (and
-       not on a house) opens the module's own picker (slumber_app.cpp, Bridges page); a choice keeps
-       the size and swaps the material, then the bridge is rebuilt with the island's building
-       spawner like a house. If the old bridge actor can't be told apart, the new one is removed
-       again and the new look shows from the next island load.
-       NOT YET TESTED IN GAME - guesses: record +8 holds the bridge id; the record's X/Z are the
-       bridge's middle in 5-unit cells (as for houses); the spawner builds bridges too and sets
-       +0x174 (record index) on them; X does nothing else in the editor when no house is under
-       the cursor. The log ("bridges: ...") shows what happened. */
+       {3, 4, 5 tiles long, 3 diagonal sizes}). A choice keeps the size and swaps the material,
+       then the bridge is rebuilt with the island's building spawner like a house; if the old
+       bridge actor can't be told apart, the new one is removed again and the new look shows
+       from the next island load. Guesses (unverified): record +8 is the id; the spawner builds
+       bridges and sets +0x174 (record index) on them. */
     constexpr s16 BridgeBuildingType = 26;
     constexpr u32 BridgeIdOffset     = 8;
-    constexpr float BridgeReach      = 30.0f;   /* cursor within this of a bridge record's spot */
     constexpr int BridgeMaterials    = 8, BridgeShapes = 6;
-    constexpr u64 BtnX               = 1u << 2;
-    /* [material][shape]: Log, Suspension, Stone, Wooden, Brick, Iron, Zen, Red zen (the picker's
-       order, bridge_icons.inc) x 3 / 4 / 5 long, diagonal 2.5 / 3.0 / 3.5. */
+    /* [material][shape]: Log, Suspension, Stone, Wooden, Brick, Iron, Zen, Red zen (the grid's
+       order, bridge_icons.py) x 3 / 4 / 5 long, diagonal 2.5 / 3.0 / 3.5. */
     static const u16 k_BridgeIds[BridgeMaterials][BridgeShapes] = {
         { 0x0e, 0x0d, 0x0f, 0x10, 0x11, 0x12 },   /* log */
         { 0x07, 0x06, 0x08, 0x09, 0x0a, 0x0b },   /* suspension */
@@ -1528,12 +1617,7 @@ namespace sl {
         { 0x13, 0x0c, 0x14, 0x15, 0x16, 0x17 },   /* zen ("Japanese") */
         { 0x20, 0x18, 0x21, 0x22, 0x23, 0x24 },   /* red zen */
     };
-    static const char* const k_BridgeShapeText[BridgeShapes] = {
-        "3 tiles long", "4 tiles long", "5 tiles long", "Diagonal, short", "Diagonal, medium", "Diagonal, long" };
 
-    static int s_BridgeRec = -1;                 /* record being edited (picker open) */
-    static std::atomic<int> s_BridgeWant{-1};    /* material picked, applied on the game thread */
-    static u64 s_EditPrevButtons = 0;
     struct BridgeSwap { u32 idx, newH; int frames; };
     static BridgeSwap s_BridgeSwap = { 0, 0, -1 };
 
@@ -1551,47 +1635,6 @@ namespace sl {
         return r[0] == BridgeBuildingType ? r : nullptr;
     }
 
-    int BridgeCurrent() {
-        s16* r = BridgeRecord(s_BridgeRec);
-        int m, k;
-        return r && BridgeLook(*reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset), &m, &k) ? m : -1;
-    }
-
-    const char* BridgeShapeText() {
-        s16* r = BridgeRecord(s_BridgeRec);
-        int m, k;
-        return r && BridgeLook(*reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset), &m, &k) ? k_BridgeShapeText[k] : "";
-    }
-
-    void BridgePick(int material) {
-        if (material >= 0 && material < BridgeMaterials) s_BridgeWant = material;
-    }
-
-    /* A house under the cursor gets HHP's own X (the exterior menu). */
-    static bool HouseUnder(const Vec3f& c) {
-        bool hit = false;
-        ForEachActor([&](u8* a) {
-            if (hit || VtOf(a) != BuildingBodyVt) return;
-            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
-            if (c.x >= p->x - 20 && c.x < p->x + 20 && c.z >= p->z - 25 && c.z < p->z + 25) hit = true;
-        });
-        return hit;
-    }
-
-    static int BridgeNear(const Vec3f& c) {
-        u8* recs = BuildingRecords();
-        if (!recs) return -1;
-        int best = -1;
-        float bestD = BridgeReach * BridgeReach;
-        for (int i = 0; i < 47; i++) {
-            s16* r = reinterpret_cast<s16*>(recs + i * 0x14);
-            if (r[0] != BridgeBuildingType) continue;
-            float dx = r[1] * 5.0f - c.x, dz = r[2] * 5.0f - c.z, d = dx * dx + dz * dz;
-            if (d < bestD) { bestD = d; best = i; }
-        }
-        return best;
-    }
-
     static void LogRecord(const char* what, const u8* r) {
         Log("bridges: %s %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x", what,
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]);
@@ -1606,17 +1649,15 @@ namespace sl {
         if (!field || !list) { Log("bridges: no building list - new look shows after a reload"); return; }
         BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
         LogRecord("list record", record.raw);
-        /* The list's record may be a copy of the save's: give it the new id too. */
-        u16* rid = reinterpret_cast<u16*>(record.raw + BridgeIdOffset);
+        u16* rid = reinterpret_cast<u16*>(record.raw + BridgeIdOffset);   /* the list's record may be a copy */
         if (*reinterpret_cast<s16*>(record.raw) == BridgeBuildingType && *rid == oldId) *rid = newId;
         u32 newH = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
         Log("bridges: spawn requested, handle %x", newH);
-        s_BridgeSwap = { (u32)idx, newH, 0 };   /* BridgeTick removes the old bridge once the new one is up */
+        s_BridgeSwap = { (u32)idx, newH, 0 };
     }
 
     /* A few frames after a respawn: the old bridge is the other actor of the new one's class with
-       the same record index. If there is none (or the new actor is not indexed), the new actor goes
-       instead, so there are never two bridges; the save already has the new look. */
+       the same record index. If there is none, the new actor goes instead (never two bridges). */
     static void FinishBridgeSwap() {
         using DelFn = void (*)(u8*);
         BridgeSwap& w = s_BridgeSwap;
@@ -1643,40 +1684,25 @@ namespace sl {
         w.frames = -1;
     }
 
-    static void ApplyBridgePick(int material) {
-        s16* r = BridgeRecord(s_BridgeRec);
-        if (!r) { Log("bridges: record %d is not a bridge any more", s_BridgeRec); return; }
+    /* Swap bridge record <rec> to <material>, keeping its size. */
+    bool ApplyBridgePick(int rec, int material) {
+        s16* r = BridgeRecord(rec);
+        if (!r || material < 0 || material >= BridgeMaterials || s_BridgeSwap.frames >= 0) return false;
         u16* id = reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset);
         int m, k;
-        if (!BridgeLook(*id, &m, &k)) { Log("bridges: unknown bridge id %x", *id); return; }
-        if (m == material) return;
+        if (!BridgeLook(*id, &m, &k)) { Log("bridges: unknown bridge id %x", *id); return false; }
+        if (m == material) return true;
         u16 oldId = *id, newId = k_BridgeIds[material][k];
         *id = newId;
-        Log("bridges: record %d id %x -> %x (%s)", s_BridgeRec, oldId, newId, k_BridgeShapeText[k]);
-        RespawnBridge(s_BridgeRec, oldId, newId);
+        Log("bridges: record %d id %x -> %x", rec, oldId, newId);
+        RespawnBridge(rec, oldId, newId);
+        return true;
     }
 
-    /* Game thread, every frame: X on a bridge in the editor opens the picker; picks are applied. */
+    /* Game thread, every frame. */
     void BridgeTick() {
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
-        if (s_BridgeSwap.frames < 0) {   /* one rebuild at a time; a pick meanwhile waits */
-            int want = s_BridgeWant.exchange(-1);
-            if (want >= 0) ApplyBridgePick(want);
-        }
-
-        u64 btn = app::TakeButtons();
-        bool xDown = (btn & BtnX) && !(s_EditPrevButtons & BtnX);
-        s_EditPrevButtons = btn;
-        if (!xDown || app::IsOpen() || !EditorMap() || !LiveLayout(s_EditLayout) || s_EditOpening || s_CursorToPlayer) return;
-        Vec3f c = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
-        if (HouseUnder(c)) return;
-        int i = BridgeNear(c);
-        if (i < 0) return;
-        s16* r = BridgeRecord(i);
-        LogRecord("picked", reinterpret_cast<u8*>(r));
-        if (!app::Ready()) { Log("bridges: picker can't be drawn here"); return; }
-        s_BridgeRec = i;
-        app::OpenBridges();
+        if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
 
     /* 0x13ba988 (edit object of a handle) for our buildings: handle +8 type, +0x10 actor handle. */
@@ -2507,6 +2533,49 @@ HOOK_DEFINE_TRAMPOLINE(HouseDesignSet) {
     }
 };
 
+/* ---- Bridges tab of the house exterior menu (see sl::HomeTabs) ---- */
+
+/* Tab strip: build the tabs from a descriptor { count, entries }. */
+HOOK_DEFINE_TRAMPOLINE(TabStripSetTabs) {
+    static void Callback(u8* strip, const void* desc, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        if (sl::HomeTabsWanted(desc)) desc = sl::HomeTabs(desc);
+        Orig(strip, desc, a2, a3, a4, a5, a6, a7);
+    }
+};
+
+/* The house menu binds its tab strip (and its tab buttons, through TabStripInit). */
+HOOK_DEFINE_TRAMPOLINE(HomeTabBind) {
+    static void Callback(u8* menu, u8* layout, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        sl::HomeTabButtonsBegin(true);
+        Orig(menu, layout, a2, a3, a4, a5, a6, a7);
+        sl::HomeTabButtonsBegin(false);
+    }
+};
+
+/* Tab strip: bind its buttons (params +0x14 = button count). */
+HOOK_DEFINE_TRAMPOLINE(TabStripInit) {
+    static void Callback(u8* strip, u8* params, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        sl::HomeTabButtonParams(params);
+        Orig(strip, params, a2, a3, a4, a5, a6, a7);
+    }
+};
+
+/* Tab button: show the icon of a tab kind. */
+HOOK_DEFINE_TRAMPOLINE(TabButtonIcon) {
+    static void Callback(u8* btn, u64 kind, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        Orig(btn, kind, a2, a3, a4, a5, a6, a7);
+        sl::HomeTabIcon(btn, (u32)kind);
+    }
+};
+
+/* House menu: the tab changed. */
+HOOK_DEFINE_TRAMPOLINE(HomeTabChanged) {
+    static void Callback(u8* menu, u8* arg, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        sl::HomeTabChanged(menu);
+        Orig(menu, arg, a2, a3, a4, a5, a6, a7);
+    }
+};
+
 /* Cliff tool's land decision (its only caller is the tool): obj +0x28 = action. */
 HOOK_DEFINE_TRAMPOLINE(CliffDecision) {
     static u32 Callback(u8* obj, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
@@ -2719,6 +2788,11 @@ extern "C" void exl_main(void* x0, void* x1) {
     HouseHoverExterior::InstallAtOffset(0x13ed9dc);
     HouseDesignGet::InstallAtOffset(0x2a914b0);
     HouseDesignSet::InstallAtOffset(0x2a91660);
+    TabStripSetTabs::InstallAtOffset(0x3036870);
+    HomeTabBind::InstallAtOffset(0x340abf0);
+    TabStripInit::InstallAtOffset(0x30358c0);
+    TabButtonIcon::InstallAtOffset(0x3033694);
+    HomeTabChanged::InstallAtOffset(0x340b120);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
     CliffReadyExec::InstallAtOffset(0x229dcd8);
