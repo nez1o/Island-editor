@@ -1583,6 +1583,30 @@ namespace sl {
         Log("bridges: tab icon frame %d (anim max %d)", (int)frame, (int)max);
     }
 
+    /* 0x2fe5370(bar, tab count, selected): plays the bar's CategoryNum animation at frame
+       <count> when the animation is that long, else to its end. Frame f lays out f + 1 tabs (the
+       game always had 5 tabs, so it always ran "to the end", frame 4). With the 6-frame animation
+       that would be wrong both ways (6 tabs: end; 5 tabs in HHP: frame 5 = 6-tab layout), so the
+       house menu's bar (remembered when its tabs are set) gets frame count - 1. */
+    static u8* s_HomeBar = nullptr;
+
+    void HomeTabStrip(u8* strip, const void* desc) {
+        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip)
+            s_HomeBar = *reinterpret_cast<u8**>(strip + 0x20);
+    }
+
+    void HomeTabBarCount(u8* bar, u32 count) {
+        if (!bar || bar != s_HomeBar || count < 1 || count > 6) return;
+        u8* anim = *reinterpret_cast<u8**>(bar + 0x208);
+        if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
+        struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 0x14, 0 };
+        u8* vt = *reinterpret_cast<u8**>(anim);
+        u8* ft = *reinterpret_cast<u8**>(anim + 24);
+        reinterpret_cast<void (*)(u8*, void*)>(*reinterpret_cast<uintptr_t*>(vt + 0x18))(anim, &q);
+        reinterpret_cast<void (*)(float, void*)>(*reinterpret_cast<uintptr_t*>(ft + 0x158))((float)(count - 1), *reinterpret_cast<void**>(anim + 8));
+        Log("bridges: tab bar laid out for %d tabs", (int)count);
+    }
+
     /* 0x340b120 (the menu's tab-changed handler): remember the menu and its tab. */
     void HomeTabChanged(u8* menu) {
         if (!menu || !EditorMap()) return;
@@ -2554,6 +2578,7 @@ HOOK_DEFINE_TRAMPOLINE(HouseDesignSet) {
 /* Tab strip: build the tabs from a descriptor { count, entries }. */
 HOOK_DEFINE_TRAMPOLINE(TabStripSetTabs) {
     static void Callback(u8* strip, const void* desc, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        sl::HomeTabStrip(strip, desc);
         if (sl::HomeTabsWanted(desc)) desc = sl::HomeTabs(desc);
         Orig(strip, desc, a2, a3, a4, a5, a6, a7);
     }
@@ -2581,6 +2606,14 @@ HOOK_DEFINE_TRAMPOLINE(TabButtonIcon) {
     static void Callback(u8* btn, u64 kind, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         Orig(btn, kind, a2, a3, a4, a5, a6, a7);
         sl::HomeTabIcon(btn, (u32)kind);
+    }
+};
+
+/* Tab bar: lay out for <count> tabs. */
+HOOK_DEFINE_TRAMPOLINE(TabBarCount) {
+    static void Callback(u8* bar, u64 count, u64 sel, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        Orig(bar, count, sel, a3, a4, a5, a6, a7);
+        sl::HomeTabBarCount(bar, (u32)count);
     }
 };
 
@@ -2826,6 +2859,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     TabButtonIcon::InstallAtOffset(0x3033694);
     HomeTabChanged::InstallAtOffset(0x340b120);
     HomeGridFill::InstallAtOffset(0x340de50);
+    TabBarCount::InstallAtOffset(0x2fe5370);
     HomeGridPage::InstallAtOffset(0x340cf90);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
