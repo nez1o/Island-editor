@@ -952,7 +952,36 @@ namespace sl::app {
 #include "bridge_icons.inc"
     static const char* const k_BridgeNames[BridgeIconCount] = {
         "Log", "Suspension", "Stone", "Wooden", "Brick", "Iron", "Zen", "Red zen" };
-    constexpr int TabTop = 76, TabH = 38, GridTop = 126, CellW = 130, CellH = 140, CellGap = 8;
+    constexpr int TabTop = 100, TabH = 34, GridTop = 144, CellW = 130, CellH = 132, CellGap = 8;
+    constexpr Rgb ColBubble = { 176, 150, 110 }, ColTabGlyph = { 150, 116, 74 }, ColTabPill = { 246, 238, 214 },
+                  ColNowBg = { 250, 214, 214 }, ColNowStripe = { 255, 232, 230 }, ColNowEdge = { 236, 150, 150 };
+    /* tab glyph (like the house tab's little house): an arched bridge */
+    static const char* const k_TabGlyph[] = {
+        ".....XXXXXX.....",
+        "..XXXX....XXXX..",
+        "XXX..X....X..XXX",
+        "XXXXXXXXXXXXXXXX",
+        "XXXXX......XXXXX",
+        "XXX..........XXX",
+        "XX............XX",
+        "XX............XX",
+    };
+    /* teal tick in a circle, like the game's \"current\" mark */
+    static const char* const k_Tick[] = {
+        "..........",
+        "........XX",
+        ".......XX.",
+        "......XX..",
+        "XX...XX...",
+        ".XX.XX....",
+        "..XXX.....",
+        "...X......",
+    };
+    static void DrawMask(const char* const* rows, int n, int x, int y, int px, Rgb col) {
+        for (int r = 0; r < n; r++)
+            for (int c = 0; rows[r][c]; c++)
+                if (rows[r][c] == 'X') FillRect(x + c * px, y + r * px, px, px, col);
+    }
     constexpr Rgb ColCell = { 255, 252, 242 }, ColCellEdge = { 232, 218, 186 }, ColTabOff = { 238, 226, 196 };
 
     static void DrawBridgeIcon(int i, int x, int y, int px) {
@@ -979,15 +1008,23 @@ namespace sl::app {
                 FillRound(U(xx) - U(2), U(yy) - U(2), U(4), U(4), U(2), ColDots);
         s_ClipY0 = 0; s_ClipY1 = H;
 
-        /* tab strip: the highlighted tab shows its picture and its name */
+        /* tab strip, as in the house menu: a cream pill of tab glyphs between L and R, the highlighted
+           tab's name in a bubble above it. Bridges is the only tab here, so L / R are dimmed. */
         int gridW = BridgeCols * CellW + (BridgeCols - 1) * CellGap, left = (PanelW - gridW) / 2;
-        int tx = U(left), ty = U(TabTop), th = U(TabH);
-        int ipx = (int)(s_Scale) < 1 ? 1 : (int)(s_Scale);   /* small picture: 1 px per sprite px at 720p */
-        int tabW = U(16) + BridgeIconW * ipx + U(10) + TextWidth(s_F->body, "Bridges") + U(18);
-        FillRound(tx, ty, tabW, th, th / 2, ColSelectEdge);
-        FillRound(tx + b, ty + b, tabW - 2 * b, th - 2 * b, th / 2 - b, ColSelect);
-        DrawBridgeIcon(cur >= 0 ? cur : 0, tx + U(16), ty + (th - BridgeIconH * ipx) / 2, ipx);
-        DrawText(s_F->body, tx + U(16) + BridgeIconW * ipx + U(10), ty + th / 2 + s_F->body->ascent * 7 / 10 / 2, "Bridges", ColText);
+        int gpx = U(2) < 2 ? 2 : U(2);
+        int pillW = U(150), pillX = (W - pillW) / 2, ty = U(TabTop), th = U(TabH);
+        FillRound(pillX, ty, pillW, th, th / 2, ColCellEdge);
+        FillRound(pillX + b, ty + b, pillW - 2 * b, th - 2 * b, th / 2 - b, ColTabPill);
+        int gw = 16 * gpx, gh = 8 * gpx;
+        DrawMask(k_TabGlyph, 8, (W - gw) / 2, ty + (th - gh) / 2, gpx, ColTabGlyph);
+        for (int side = 0; side < 2; side++) {   /* L / R keys */
+            int kw = U(26), kx = side ? pillX + pillW + U(10) : pillX - U(10) - kw;
+            FillRound(kx, ty + (th - kw) / 2, kw, kw, U(5), ColOff);
+            DrawText(s_F->small, kx + kw / 2, ty + th / 2 + s_F->small->ascent * 7 / 10 / 2, side ? "R" : "L", ColOffText, 0, 1);
+        }
+        int bw = TextWidth(s_F->small, "Bridges") + U(24), bh = U(24), bx = (W - bw) / 2, by = ty - bh - U(2);
+        FillRound(bx, by, bw, bh, bh / 2, ColBubble);
+        DrawText(s_F->small, W / 2, by + bh / 2 + s_F->small->ascent * 7 / 10 / 2, "Bridges", ColWhite, 0, 1);
         const char* shape = BridgeShapeText();
         if (shape && *shape)
             DrawText(s_F->small, U(left + gridW), ty + th / 2 + s_F->small->ascent * 7 / 10 / 2, shape, ColDim, 0, 2);
@@ -997,17 +1034,26 @@ namespace sl::app {
         for (int i = 0; i < BridgeCols * BridgeRows && i < BridgeIconCount; i++) {
             int cx = U(left + (i % BridgeCols) * (CellW + CellGap)), cy = U(GridTop + (i / BridgeCols) * (CellH + CellGap));
             int cw = U(CellW), ch = U(CellH);
-            bool sel = i == s_BridgeSel;
-            FillRound(cx, cy, cw, ch, U(14), sel ? ColSelectEdge : ColCellEdge);
-            FillRound(cx + b * (sel ? 2 : 1), cy + b * (sel ? 2 : 1), cw - b * (sel ? 4 : 2), ch - b * (sel ? 4 : 2),
-                      U(14) - b, sel ? ColSelect : ColCell);
+            bool sel = i == s_BridgeSel, now = i == cur;
+            int in = b * (sel ? 2 : 1);
+            FillRound(cx, cy, cw, ch, U(14), sel ? ColSelectEdge : now ? ColNowEdge : ColCellEdge);
+            FillRound(cx + in, cy + in, cw - 2 * in, ch - 2 * in, U(14) - b, sel ? ColSelect : now ? ColNowBg : ColCell);
+            if (now) {   /* the current look: pink with light stripes, like the game */
+                int c0 = s_ClipX0, c1 = s_ClipX1, y0 = s_ClipY0, y1 = s_ClipY1;
+                s_ClipX0 = cx + in + U(6); s_ClipX1 = cx + cw - in - U(6); s_ClipY0 = cy + in + U(6); s_ClipY1 = cy + ch - in - U(6);
+                int sw = U(9);
+                for (int k = -ch; k < cw; k += sw * 2)
+                    for (int yy = 0; yy < ch; yy++) FillRect(cx + k + yy, cy + yy, sw, 1, sel ? ColSelect : ColNowStripe);
+                s_ClipX0 = c0; s_ClipX1 = c1; s_ClipY0 = y0; s_ClipY1 = y1;
+            }
             int iw = BridgeIconW * px, ih = BridgeIconH * px;
-            DrawBridgeIcon(i, cx + (cw - iw) / 2, cy + U(14), px);
-            DrawText(s_F->body, cx + cw / 2, cy + ch - U(16), k_BridgeNames[i], ColText, cw - U(12), 1);
-            if (i == cur) {   /* the bridge's look now */
-                int nw = TextWidth(s_F->small, "Now") + U(14), nh = U(20);
-                FillRound(cx + cw - nw - U(6), cy + U(6), nw, nh, nh / 2, ColOn);
-                DrawText(s_F->small, cx + cw - U(6) - nw / 2, cy + U(6) + nh / 2 + s_F->small->ascent * 7 / 10 / 2, "Now", ColWhite, 0, 1);
+            DrawBridgeIcon(i, cx + (cw - iw) / 2, cy + U(12), px);
+            DrawText(s_F->body, cx + cw / 2, cy + ch - U(14), k_BridgeNames[i], ColText, cw - U(12), 1);
+            if (now) {   /* teal tick at the picture's lower right */
+                int r = U(13), tx = cx + cw - U(12) - 2 * r, tyy = cy + U(12) + ih - r;
+                FillRound(tx, tyy, 2 * r, 2 * r, r, ColOn);
+                int tp = (2 * r) / 14 < 1 ? 1 : (2 * r) / 14;
+                DrawMask(k_Tick, 8, tx + r - 5 * tp, tyy + r - 4 * tp, tp, ColWhite);
             }
             (void)ih;
         }
