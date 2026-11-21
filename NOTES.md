@@ -172,9 +172,14 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   player houses in `main.cpp`. The menu's theme banner showed "Construction Job Site" on island houses: the
   banner code at `0x345d7bc` reads the vacation home's theme (u16 at +0xd8; 0xffff = none -> theme 0 =
   System `OneRoom_ThemeName` label 0000) and sets it via `0x1aea210` / `0x1aea9c8`. With the editor on, the
-  "none" path is skipped (`0x345d7cc` `mov w2, wzr` -> `b 0x345d81c`), so the text stays empty (v0.62).
-  The brown plate behind it still shows. Found with read watchpoints on the `OneRoom_ThemeName` string in Eden
-  (`work-tools/eden_gdb.py`); static xrefs missed this site.
+  "none" path is skipped (`0x345d7cc` `mov w2, wzr` -> `b 0x345d81c`; `0x345ca38` / `0x345ca6c` also jump
+  straight there), so the text stays empty. v0.62 also hides the whole banner on the island: inline hook at
+  `0x345d81c` (end of that code, x19 = text object, +0x90 = `T_Text_00` pane) walks the parents
+  `N_Center_00` -> `N_Capture_00` -> `N_InOut_00` (zigzag = `P_Line_00`, under `N_Capture_00`) and clears
+  `N_InOut_00`'s visible bit. ui2d panes in 3.0.3: +0x18 parent, +0x20 child list root (nodes = child+8),
+  +0x50 size, +0x58 flag (bit 0 visible), +0x59 alpha, +0xb0 name. Found with read watchpoints on the
+  `OneRoom_ThemeName` string in Eden (`work-tools/eden_gdb.py`; static xrefs missed this site), then a logging
+  build that walked the pane tree.
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 

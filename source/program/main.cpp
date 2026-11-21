@@ -1872,7 +1872,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.61 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.62 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2230,6 +2230,36 @@ HOOK_DEFINE_TRAMPOLINE(EditCameraFocus) {
     }
 };
 
+/* HHP exterior menu: the vacation home's theme banner (layout RootPane > N_InOut_00 > N_Capture_00 >
+   {P_Line_00 zigzag, N_Center_00 > T_Text_00 theme text}) means nothing on the island, where houses
+   have no theme. 0x345d81c ends the banner-text code (both the normal path and the editor's skip,
+   see ThemeBannerSkip); x19 = the text object, +0x90 its T_Text_00 pane. On the island editor map,
+   hide the whole banner. ui2d panes in this build: +0x18 parent, +0x58 flag (bit 0 = visible), +0xb0 name;
+   each step checks the pane's name first. */
+static bool PaneNamed(u64 p, const char* want) {
+    return p && !(p & 7) && strncmp(reinterpret_cast<const char*>(p + 0xb0), want, 24) == 0;
+}
+HOOK_DEFINE_INLINE(ThemeBannerHide) {
+    static void Callback(exl::hook::InlineCtx* ctx) {
+        if (!sl::EditorMap()) return;
+        u64 obj = ctx->X[19];
+        if (!obj || (obj & 7)) return;
+        u64 text = *reinterpret_cast<const u64*>(obj + 0x90);
+        if (!PaneNamed(text, "T_Text_00")) return;
+        u64 center = *reinterpret_cast<const u64*>(text + 0x18);
+        if (!PaneNamed(center, "N_Center_00")) return;
+        u64 capture = *reinterpret_cast<const u64*>(center + 0x18);
+        if (!PaneNamed(capture, "N_Capture_00")) return;
+        u64 banner = *reinterpret_cast<const u64*>(capture + 0x18);
+        if (!PaneNamed(banner, "N_InOut_00")) return;
+        u8* flag = reinterpret_cast<u8*>(banner + 0x58);
+        if (*flag & 1) {
+            *flag &= ~1;
+            sl::Log("island editor: theme banner hidden");
+        }
+    }
+};
+
 /* HHP's per-frame house hover (0x13cfd7c: play mode == HHP?) also runs on the main island. */
 HOOK_DEFINE_INLINE(BuildingHoverGate) {
     static void Callback(exl::hook::InlineCtx* ctx) {
@@ -2534,6 +2564,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     RiverWaitExit::InstallAtOffset(0x2295178);
     RiverDigExit::InstallAtOffset(0x2295320);
     RiverBuryExit::InstallAtOffset(0x22954c4);
+    ThemeBannerHide::InstallAtOffset(0x345d81c);
 }
 
 extern "C" NORETURN void exl_exception_entry() {
