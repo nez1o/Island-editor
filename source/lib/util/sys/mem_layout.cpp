@@ -91,6 +91,14 @@ namespace exl::util {
                     break;
                 }
                 case State::ExpectingData: {
+                    /* The data segment can start with a read-only RELRO part (rtld protects
+                       .data.rel.ro after relocating, e.g. the SDK on Eden): keep looking for
+                       the RW part, but count the RELRO pages as data. */
+                    if(memtype == MemType_CodeMutable && meminfo.perm == Perm_R && curModInfo.m_Data.m_Start == 0) {
+                        curModInfo.m_Data.m_Start = meminfo.addr;
+                        continue;
+                    }
+
                     if(memtype != MemType_CodeMutable || meminfo.perm != Perm_Rw) {
                         /* Not a proper module, reset. */
                         reset();
@@ -101,8 +109,9 @@ namespace exl::util {
                     auto& data = curModInfo.m_Data;
 
                     /* Assign the data range and finish total range. */
-                    data.m_Start = meminfo.addr;
-                    data.m_Size = meminfo.size;
+                    if(data.m_Start == 0)
+                        data.m_Start = meminfo.addr;
+                    data.m_Size = meminfo.addr + meminfo.size - data.m_Start;
                     total.m_Size = data.GetEnd() - total.m_Start;
 
                     /* Get the MOD0 pointer. */

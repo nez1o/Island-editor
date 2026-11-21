@@ -2328,13 +2328,74 @@ HOOK_DEFINE_TRAMPOLINE(FrameTick) {
 
 /* ---- Slumber app screen: NVN and controller hooks (see slumber_app.cpp) ---- */
 
-/* Address of a function the SDK module exports, or 0. */
+/* Address of a function the SDK module exports, or 0.
+   Read-only lookup through the module's own dynamic section: exl::reloc::GetSymbol can
+   (re)initialize the rtld module object it is given, and if the layout scan ever mistakes
+   another module for the SDK (it once took this module, on Eden) that corrupts the game's
+   rtld state and the first lazy-bound call panics in BindJumpSlotRel. */
+/* Address of <name> exported by one game module, or 0 (read-only lookup).
+   ACNH's sdk and subsdk0 only carry a GNU hash table (DT_GNU_HASH), main a SysV one (DT_HASH). */
+static uintptr_t ModuleSymbol(exl::util::ModuleIndex idx, const char* name) {
+    constexpr s64 DtGnuHash = 0x6ffffef5;
+    if (!exl::util::HasModule(idx)) return 0;
+    const auto& info = exl::util::GetModuleInfo(idx);
+    if (info.m_Total.m_Start == exl::util::GetSelfModuleInfo().m_Total.m_Start) return 0;
+    const uintptr_t base = info.m_Total.m_Start;
+    const u32* hash = nullptr;
+    const u32* gnu = nullptr;
+    const Elf_Sym* syms = nullptr;
+    const char* strs = nullptr;
+    for (const Elf_Dyn* d = info.m_Mod->GetDynamic(); d->d_tag != DT_NULL; d++) {
+        if (d->d_tag == DT_HASH) hash = reinterpret_cast<const u32*>(base + d->d_un.d_val);
+        else if (d->d_tag == DtGnuHash) gnu = reinterpret_cast<const u32*>(base + d->d_un.d_val);
+        else if (d->d_tag == DT_SYMTAB) syms = reinterpret_cast<const Elf_Sym*>(base + d->d_un.d_val);
+        else if (d->d_tag == DT_STRTAB) strs = reinterpret_cast<const char*>(base + d->d_un.d_val);
+    }
+    if (!syms || !strs) return 0;
+    auto match = [&](u32 i) {
+        const Elf_Sym& s = syms[i];
+        return s.st_shndx != SHN_UNDEF && s.st_value && strcmp(strs + s.st_name, name) == 0;
+    };
+    if (gnu && gnu[0]) {
+        const u32 nbucket = gnu[0], symoffset = gnu[1], bloom_size = gnu[2];
+        const u32* buckets = gnu + 4 + bloom_size * 2;   /* bloom words are 64-bit */
+        const u32* chain = buckets + nbucket;
+        u32 h = 5381;
+        for (const char* p = name; *p; p++) h = h * 33 + (u8)*p;
+        u32 i = buckets[h % nbucket];
+        if (i >= symoffset) {
+            while (true) {
+                const u32 h2 = chain[i - symoffset];
+                if ((h | 1) == (h2 | 1) && match(i)) return base + syms[i].st_value;
+                if (h2 & 1) break;
+                i++;
+            }
+        }
+    }
+    if (hash && hash[0]) {
+        const u32 nbucket = hash[0];
+        const u32* bucket = hash + 2;
+        const u32* chain = bucket + nbucket;
+        u32 h = 0;
+        for (const char* p = name; *p; p++) {
+            h = (h << 4) + (u8)*p;
+            u32 g = h & 0xf0000000;
+            if (g) h ^= g >> 24;
+            h &= ~g;
+        }
+        for (u32 i = bucket[h % nbucket]; i; i = chain[i])
+            if (match(i)) return base + syms[i].st_value;
+    }
+    return 0;
+}
+
+/* Address of a function a game module exports (the SDK first, then main and the subsdks), or 0. */
 static uintptr_t SdkSymbol(const char* name) {
     using exl::util::ModuleIndex;
-    if (!exl::util::HasModule(ModuleIndex::Sdk)) return 0;
-    const Elf_Sym* sym = exl::reloc::GetSymbol(ModuleIndex::Sdk, name);
-    if (!sym || !sym->st_value) return 0;
-    return exl::util::GetModuleInfo(ModuleIndex::Sdk).m_Total.m_Start + sym->st_value;
+    if (uintptr_t at = ModuleSymbol(ModuleIndex::Sdk, name)) return at;
+    for (int i = (int)ModuleIndex::Main; i < (int)ModuleIndex::Sdk; i++)
+        if (uintptr_t at = ModuleSymbol((ModuleIndex)i, name)) return at;
+    return 0;
 }
 
 /* Every NVN function the game looks up passes through here. */

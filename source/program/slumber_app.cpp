@@ -187,7 +187,7 @@ namespace sl::app {
     constexpr int BuilderRecs = 16;
     static BuilderRec s_PoolBuilders[BuilderRecs], s_TexBuilders[BuilderRecs];
     static std::atomic<int> s_PoolBuilderNext{0}, s_TexBuilderNext{0};
-    struct IconPool { const void* pool; ptrdiff_t sigOffset; };
+    struct IconPool { const void* pool; ptrdiff_t sigOffset; ptrdiff_t texOffset; };   /* texOffset: best match so far, -1 none */
     constexpr int IconPools = 4;
     static IconPool s_IconPools[IconPools];
     static std::atomic<void*> s_IconTex{nullptr};
@@ -238,14 +238,14 @@ namespace sl::app {
         u8 ok = s_RealPoolInit(pool, builder);
         if (ok && sig >= 0) {
             for (IconPool& p : s_IconPools)
-                if (!p.pool || p.pool == pool) { p = { pool, sig }; break; }
+                if (!p.pool || p.pool == pool) { p = { pool, sig, -1 }; break; }
             Log("app: phone icon data found in a memory pool (+%lx)", (unsigned long)sig);
         }
         return ok;
     }
 
     static void PoolFinalize(void* pool) {
-        for (IconPool& p : s_IconPools) if (p.pool == pool) p = { nullptr, 0 };
+        for (IconPool& p : s_IconPools) if (p.pool == pool) p = { nullptr, 0, -1 };
         s_RealPoolFinalize(pool);
     }
 
@@ -258,11 +258,15 @@ namespace sl::app {
         u8 ok = s_RealTexInit(texture, builder);
         const BuilderRec* r = ok ? Recall(s_TexBuilders, builder) : nullptr;
         if (!r) return ok;
-        for (const IconPool& p : s_IconPools) {
+        /* Other 180x180 icons (Critterpedia's DeviceIconBook2) can also start within 64 KB before the
+           signature; the icon is the one that starts closest before it, whatever the creation order. */
+        for (IconPool& p : s_IconPools) {
             if (!p.pool || p.pool != r->a || p.sigOffset < r->b || p.sigOffset >= r->b + 0x10000) continue;
+            if (p.texOffset >= 0 && r->b <= p.texOffset) continue;
             if (!LoadProcs() || P.TextureGetWidth(texture) != IconSize || P.TextureGetHeight(texture) != IconSize) continue;
+            p.texOffset = r->b;
             s_IconTex.store(texture, std::memory_order_release);
-            Log("app: phone icon texture %p - animating it", texture);
+            Log("app: phone icon texture %p (+%lx) - animating it", texture, (unsigned long)r->b);
         }
         return ok;
     }

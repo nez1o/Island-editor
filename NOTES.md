@@ -37,7 +37,16 @@ The log's first line shows the version and main base, so it is the quickest way 
 
 Gotchas:
 - **Eden/yuzu infinite loading = GDB stub enabled** (Configure > Debug). It suspends the game until a debugger
-  attaches; the mods are not the cause.
+  attaches; the mods are not the cause. (If the stub is off and `log.txt` stays empty, check Eden's log for a
+  `BindJumpSlotRel` panic: see the next point.)
+- **exlaunch's module scan and the SDK.** On Eden the SDK's data segment starts with a read-only RELRO part;
+  the stock scan expected RW right after rodata, skipped the SDK and took this module as `ModuleIndex::Sdk`.
+  `mem_layout.cpp` now accepts the RELRO pages. Don't use `exl::reloc::GetSymbol` on game modules: it can
+  (re)initialise the rtld module object it is handed (a wrong one broke lazy binding -> `BindJumpSlotRel`
+  panic, infinite loading), and it only reads DT_HASH, while ACNH's sdk and subsdk0 only have DT_GNU_HASH.
+  `SdkSymbol` in `main.cpp` does a read-only GNU/SysV hash lookup instead.
+- **Phone icon texture match.** Critterpedia's `DeviceIconBook2^x` (180x180) can also start within 64 KB before
+  the icon signature; `TexInit` keeps the texture that starts closest before it (one "animating it" log line).
 - Other installed mods on the same setup: ACNH_PlaceAnywhere and ACNH_MultiplayerDecorationUnlock (exefs IPS)
   and tmouh's 60 FPS + SpeedFix. Their patched words were checked: none overlap this mod's hooks or patches.
 - Before hooking an address, check the instruction before it is `ret`/`b`/`udf` (a real function start).
