@@ -1928,7 +1928,9 @@ namespace sl {
         return field + ((mi == 0x32 || mi == 1) ? 0x26f8 : 0x94b0) + 8 + idx * 0x208;
     }
 
-    static void RedoSurface() {
+    [[maybe_unused]] static void RedoSurface() {   /* not used yet: 0x2a81bf0 wants the HHP-style structure
+        actor (type at +0x550), not the island's building body, so it returned early and the
+        bridge was left with no surface */
         SurfaceRedo& r = s_SurfaceRedo;
         if (r.frames < 0 || ++r.frames < 15) return;
         r.frames = -1;
@@ -1980,7 +1982,7 @@ namespace sl {
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
         if (u8* ob = ActorOfHandle(oldH)) {
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
-            s_SurfaceRedo = { w.idx, w.newH, 0 };
+            /* s_SurfaceRedo = { w.idx, w.newH, 0 };   (see RedoSurface) */
             /* (Rebuilding the building slot here left no collision at all, so the walkable shape
                keeps the old look's until the island reloads - entering a building and coming back
                out rebuilds it from the save, which has the new look.) */
@@ -2125,7 +2127,6 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
-        RedoSurface();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
