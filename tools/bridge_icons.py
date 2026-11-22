@@ -221,6 +221,29 @@ def tab_icon(size=128, ss=4):
     return img
 
 
+def incline_tab_icon(size=128, ss=4):
+    """The Inclines tab's icon: a white four-step staircase going up to the right (0-255 mask)."""
+    N = size * ss
+    steps = 4
+    def inside(x, y):
+        # slope body: under the line from bottom-left to top-right
+        x0, y0, x1, y1 = 0.08 * N, 0.90 * N, 0.92 * N, 0.18 * N
+        if not (x0 <= x <= x1 and y <= y0): return False
+        t = (x - x0) / (x1 - x0)
+        # stairs: the top edge is a staircase following the slope
+        k = min(steps - 1, int(t * steps))
+        top = y0 - (y0 - y1) * (k + 1) / steps
+        return y >= top
+    img = []
+    for y in range(size):
+        row = []
+        for x in range(size):
+            c = sum(inside(x * ss + i + 0.5, y * ss + j + 0.5) for i in range(ss) for j in range(ss))
+            row.append(round(255 * c / (ss * ss)))
+        img.append(row)
+    return img
+
+
 def write_inc(path):
     pal = []
     for g in ICONS:

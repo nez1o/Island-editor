@@ -942,8 +942,10 @@ namespace sl {
     /* 0x13d0308 on the main island: the building whose footprint holds the cursor cell
        (query +8 / +0xc, 5-unit cells). Fills the full rect (out) and the min cell (minOut) like
        the game. Returns the body's actor handle or 0. */
-    static bool IsBridgeBody(u8* body);
+    static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
+    static bool IsBridgeBody(u8* body) { return StructureOfBody(body) != 0; }
     constexpr float BridgeReach = 28.0f;   /* a bridge is up to 5 tiles long: hover within this of its middle */
+    constexpr float InclineReach = 18.0f;
 
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
@@ -954,13 +956,16 @@ namespace sl {
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
             if (cx >= p->x - 20 && cx < p->x + 20 && cz >= p->z - 25 && cz < p->z + 25) body = a;
         });
-        if (!body) {   /* bridges (building bodies too): within BridgeReach of the middle */
-            float best = BridgeReach * BridgeReach;
+        if (!body) {   /* bridges and inclines (building bodies too): near their middle */
+            float best = 1e9f;
             ForEachActor([&](u8* a) {
-                if (VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) return;
+                if (VtOf(a) != BuildingBodyVt) return;
+                int kind = StructureOfBody(a);
+                if (!kind) return;
+                float reach = kind == 26 ? BridgeReach : InclineReach;
                 const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
                 float d = (p->x - cx) * (p->x - cx) + (p->z - cz) * (p->z - cz);
-                if (d < best) { best = d; body = a; }
+                if (d < reach * reach && d < best) { best = d; body = a; }
             });
         }
         if (!body) return 0;
@@ -1504,7 +1509,7 @@ namespace sl {
     bool MenuOnBridge();
 
     bool HouseDesignSet(u32 handle, const u8* design) {
-        if (BridgeTabOpen() || MenuOnBridge()) { Log("bridges: house pick ignored (menu on a bridge / Bridges tab)"); return true; }
+        if (BridgeTabOpen() || MenuOnBridge()) { Log("bridges: house pick ignored (menu on a bridge or incline / extra tab)"); return true; }
         HouseExt e;
         if (!design || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
         const u16* d = reinterpret_cast<const u16*>(design);
@@ -1535,13 +1540,14 @@ namespace sl {
     constexpr u32 HomeTabDesc        = 0x4a33ed0;   /* { u64 count, entry* } */
     constexpr u32 HomeTabEntrySize   = 0x70;
     constexpr u32 BridgeTabKind      = 0x7f;        /* not one of the game's kinds (0x2a-0x2f) */
-    constexpr int BridgeTab          = 5;
+    constexpr u32 InclineTabKind     = 0x7e;
+    constexpr int BridgeTab          = 5, InclineTab = 6, HomeTabCount = 7;
     constexpr u32 MenuTabIndex       = 0x1c290;
     constexpr u32 TabBtnKind         = 0x270, TabBtnAnim = 600;
     constexpr u32 AnimFrameQueryGot  = 0x4ac4f00;   /* vtable base of the anim query object */
 
     struct alignas(8) HomeTabDescT { u64 count; u8* entries; };
-    alignas(16) static u8 s_HomeTabs[6 * HomeTabEntrySize];
+    alignas(16) static u8 s_HomeTabs[HomeTabCount * HomeTabEntrySize];
     static HomeTabDescT s_HomeTabDesc = { 0, nullptr };
     static bool s_HomeTabButtons = false;   /* 0x340abf0 is binding the menu's tab buttons */
     static u8* s_HomeMenu = nullptr;         /* the open menu (seen on a tab change) */
@@ -1556,16 +1562,20 @@ namespace sl {
         const HomeTabDescT* g = reinterpret_cast<const HomeTabDescT*>(gameDesc);
         if (!g || g->count != 5 || !g->entries) return gameDesc;
         memcpy(s_HomeTabs, g->entries, 5 * HomeTabEntrySize);
-        u8* e = s_HomeTabs + BridgeTab * HomeTabEntrySize;
-        memcpy(e, g->entries + 1 * HomeTabEntrySize, HomeTabEntrySize);
-        *reinterpret_cast<u32*>(e + 0x08) = BridgeTabKind;
-        /* FixedSafeString<64> at +0x10: vtable, char* (-> own buffer at +0x24), s32 capacity */
-        *reinterpret_cast<char**>(e + 0x18) = reinterpret_cast<char*>(e + 0x24);
-        memset(e + 0x24, 0, 0x40);
-        memcpy(e + 0x24, "1290", 5);
-        e[0x68] = 1;
-        s_HomeTabDesc = { 6, s_HomeTabs };
-        Log("bridges: menu gets 6 tabs");
+        static const struct { int tab; u32 kind; const char* label; } extra[] = {
+            { BridgeTab, BridgeTabKind, "1290" }, { InclineTab, InclineTabKind, "1291" } };   /* bridges_tab.py */
+        for (const auto& x : extra) {
+            u8* e = s_HomeTabs + x.tab * HomeTabEntrySize;
+            memcpy(e, g->entries + 1 * HomeTabEntrySize, HomeTabEntrySize);
+            *reinterpret_cast<u32*>(e + 0x08) = x.kind;
+            /* FixedSafeString<64> at +0x10: vtable, char* (-> own buffer at +0x24), s32 capacity */
+            *reinterpret_cast<char**>(e + 0x18) = reinterpret_cast<char*>(e + 0x24);
+            memset(e + 0x24, 0, 0x40);
+            memcpy(e + 0x24, x.label, 5);
+            e[0x68] = 1;
+        }
+        s_HomeTabDesc = { HomeTabCount, s_HomeTabs };
+        Log("bridges: menu gets %d tabs", HomeTabCount);
         return &s_HomeTabDesc;
     }
 
@@ -1575,13 +1585,14 @@ namespace sl {
     void HomeTabButtonParams(u8* params) {
         if (!s_HomeTabButtons || !params) return;
         u32* n = reinterpret_cast<u32*>(params + 0x14);
-        if (*n == 5) { *n = 6; Log("bridges: 6 tab buttons"); }
+        if (*n == 5) { *n = HomeTabCount; Log("bridges: %d tab buttons", HomeTabCount); }
     }
 
     /* After 0x3033694 put frame 0 on an unknown kind: the bridge kind gets Pattern frame 5
        (same calls as the end of 0x3033694). */
     void HomeTabIcon(u8* btn, u32 kind) {
-        if (kind != BridgeTabKind || !btn) return;
+        int tab = kind == BridgeTabKind ? BridgeTab : kind == InclineTabKind ? InclineTab : -1;
+        if (tab < 0 || !btn) return;
         u8* anim = *reinterpret_cast<u8**>(btn + TabBtnAnim);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
         struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 9, 0 };
@@ -1594,7 +1605,7 @@ namespace sl {
         float max = reinterpret_cast<MaxFn>(*reinterpret_cast<uintptr_t*>(ft + 0xb0))(*reinterpret_cast<void**>(anim + 8));
         q.id = 0x14;
         reinterpret_cast<SelFn>(*reinterpret_cast<uintptr_t*>(vt + 0x18))(anim, &q);
-        float frame = (float)BridgeTab <= max ? (float)BridgeTab : 0.0f;
+        float frame = (float)tab <= max ? (float)tab : 0.0f;
         reinterpret_cast<SetFn>(*reinterpret_cast<uintptr_t*>(ft + 0x158))(frame, *reinterpret_cast<void**>(anim + 8));
         Log("bridges: tab icon frame %d (anim max %d)", (int)frame, (int)max);
     }
@@ -1615,7 +1626,7 @@ namespace sl {
     static u8* HomeBar() { return s_HomeStrip ? *reinterpret_cast<u8**>(s_HomeStrip + 0x20) : nullptr; }
 
     void HomeTabBarCount(u8* bar, u32 count) {
-        if (!bar || bar != HomeBar() || count < 1 || count > 6) return;
+        if (!bar || bar != HomeBar() || count < 1 || count > (u32)HomeTabCount) return;
         u8* anim = *reinterpret_cast<u8**>(bar + 0x208);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) { Log("bridges: bar has no CategoryNum anim"); return; }
         struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 0x14, 0 };
@@ -1637,25 +1648,27 @@ namespace sl {
     }
 
     constexpr u32 MenuGridCount = 0x1c1f0;
-    constexpr u32 BridgeCells   = 8;
+    constexpr u32 BridgeCells   = 8, InclineCells = 8;
 
     /* 0x340de50 (fill the grid for the current tab; tabs 0-4 set the item count at +0x1c1f0,
        other tabs keep it): the Bridges tab has one cell per bridge material. */
     void HomeGridFill(u8* menu) {
         if (menu && EditorMap() && menu + 0x1c260 == s_HomeStrip)   /* also lays the tab bar out */
             HomeTabBarCount(HomeBar(), *reinterpret_cast<u32*>(s_HomeStrip + 0x28));
-        if (!menu || !EditorMap() || *reinterpret_cast<s32*>(menu + MenuTabIndex) != BridgeTab) return;
-        *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
+        if (!menu || !EditorMap()) return;
+        s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
+        if (tab == BridgeTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
+        if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
     }
 
     /* 0x340cf90 (a list page scrolled into view: requests the 3D captures of the visible items).
        Skipped on the Bridges tab, which has no house parts to capture. */
     bool HomeGridCaptureSkip(u8* menu) {
-        return menu && EditorMap() && *reinterpret_cast<s32*>(menu + MenuTabIndex) == BridgeTab;
+        return menu && EditorMap() && *reinterpret_cast<s32*>(menu + MenuTabIndex) >= BridgeTab;
     }
 
     bool BridgeTabOpen() {
-        return s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(s_HomeMenu + MenuTabIndex) == BridgeTab;
+        return s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(s_HomeMenu + MenuTabIndex) >= BridgeTab;
     }
 
     /* ---- bridge looks (save side; the grid of the Bridges tab will call ApplyBridgePick) ----
@@ -1666,7 +1679,7 @@ namespace sl {
        bridge actor can't be told apart, the new one is removed again and the new look shows
        from the next island load. Guesses (unverified): record +8 is the id; the spawner builds
        bridges and sets +0x174 (record index) on them. */
-    constexpr s16 BridgeBuildingType = 26;
+    constexpr s16 BridgeBuildingType = 26, InclineBuildingType = 27;
     constexpr u32 BridgeIdOffset     = 8;
     constexpr int BridgeMaterials    = 8, BridgeShapes = 6;
     /* [material][shape]: Log, Suspension, Stone, Wooden, Brick, Iron, Zen, Red zen (the grid's
@@ -1701,15 +1714,18 @@ namespace sl {
 
     static void LogRecord(const char* what, const u8* r);
 
-    /* Building body of a bridge: its record (body +0x174) has type 26. */
-    static bool IsBridgeBody(u8* body) {
+    /* Building body of a bridge or incline: its record (body +0x174) has type 26 / 27. */
+    static int StructureOfBody(u8* body) {
         u8* recs = BuildingRecords();
-        if (!recs || !body) return false;
+        if (!recs || !body) return 0;
         u32 i = *reinterpret_cast<u32*>(body + ActorRecordIndex);
-        return i < 47 && *reinterpret_cast<s16*>(recs + i * 0x14) == BridgeBuildingType;
+        s16 t = i < 47 ? *reinterpret_cast<s16*>(recs + i * 0x14) : 0;
+        return t == BridgeBuildingType || t == InclineBuildingType ? t : 0;
     }
 
-    static int s_MenuBridge = -1;   /* record of the bridge the house menu was opened on, or -1 */
+    static int s_MenuBridge = -1;   /* record of the bridge / incline the house menu was opened on, or -1 */
+    static int s_MenuKind = 0;      /* its record type (26 / 27) */
+    bool ApplyInclinePick(int rec, int which);
     bool ApplyBridgePick(int rec, int material);
 
     /* 0x2a914b0 for a bridge: the menu was opened on a bridge. The design stays "none" (0xffff),
@@ -1720,7 +1736,9 @@ namespace sl {
             if (s_RemapFrom[i] == handle) a = ActorOfHandle(s_RemapTo[i]);
         if (!a || VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) { s_MenuBridge = -1; return false; }
         s_MenuBridge = (int)*reinterpret_cast<u32*>(a + ActorRecordIndex);
-        LogRecord("menu on bridge", reinterpret_cast<u8*>(BridgeRecord(s_MenuBridge)));
+        s_MenuKind = StructureOfBody(a);
+        u8* recs = BuildingRecords();
+        if (recs) LogRecord(s_MenuKind == BridgeBuildingType ? "menu on bridge" : "menu on incline", recs + s_MenuBridge * 0x14);
         return true;
     }
 
@@ -1729,14 +1747,16 @@ namespace sl {
     /* 0x3036ca0(strip, owner, first tab): a menu opened on a bridge starts on the Bridges tab. */
     u32 HomeTabStart(u8* strip, u32 first) {
         if (!MenuOnBridge() || !strip || strip != s_HomeStrip) return first;
-        Log("bridges: menu opens on the Bridges tab");
-        return BridgeTab;
+        int tab = s_MenuKind == InclineBuildingType ? InclineTab : BridgeTab;
+        Log("bridges: menu opens on tab %d", tab);
+        return (u32)tab;
     }
 
     /* 0x340c1d0(menu, event): A on a grid cell. On the Bridges tab: which cell (the game's own
        index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on. */
     bool HomeGridPick(u8* menu, u8* event) {
-        if (!menu || !event || !EditorMap() || *reinterpret_cast<s32*>(menu + MenuTabIndex) != BridgeTab) return false;
+        s32 tab = menu ? *reinterpret_cast<s32*>(menu + MenuTabIndex) : -1;
+        if (!menu || !event || !EditorMap() || tab < BridgeTab) return false;
         u8* owner = *reinterpret_cast<u8**>(menu + 0x220);
         u8* list = owner ? *reinterpret_cast<u8**>(owner + 0x578) : nullptr;
         if (!list) return true;
@@ -1763,8 +1783,11 @@ namespace sl {
         s32 idx = top * cols - row * cols + slot;
         if (idx < 0 || idx >= *reinterpret_cast<s32*>(list + 0x3cc)) idx = -1;
         Log("bridges: cell %d picked (slot %d)", idx, slot);
-        if (idx >= 0 && MenuOnBridge()) ApplyBridgePick(s_MenuBridge, idx);
-        else if (idx >= 0) Log("bridges: menu is on a house - point at a bridge and press X");
+        int want = tab == BridgeTab ? BridgeBuildingType : InclineBuildingType;
+        if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
+            if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
+            else ApplyInclinePick(s_MenuBridge, idx);
+        } else if (idx >= 0) Log("bridges: point at a %s and press X to change it", want == BridgeBuildingType ? "bridge" : "incline");
         return true;
     }
 
@@ -1783,7 +1806,8 @@ namespace sl {
         BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
         LogRecord("list record", record.raw);
         u16* rid = reinterpret_cast<u16*>(record.raw + BridgeIdOffset);   /* the list's record may be a copy */
-        if (*reinterpret_cast<s16*>(record.raw) == BridgeBuildingType && *rid == oldId) *rid = newId;
+        s16 rt = *reinterpret_cast<s16*>(record.raw);
+        if ((rt == BridgeBuildingType || rt == InclineBuildingType) && *rid == oldId) *rid = newId;
         u32 newH = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
         Log("bridges: spawn requested, handle %x", newH);
         s_BridgeSwap = { (u32)idx, newH, 0 };
@@ -1828,6 +1852,33 @@ namespace sl {
         u16 oldId = *id, newId = k_BridgeIds[material][k];
         *id = newId;
         Log("bridges: record %d id %x -> %x", rec, oldId, newId);
+        RespawnBridge(rec, oldId, newId);
+        return true;
+    }
+
+    /* Inclines: one id per look (record +8, NHSE's SlopeType), no sizes. The grid's order; the names
+       are guesses from NHSE's identifiers (check them in game): */
+    static const u16 k_InclineIds[] = {
+        0x1d,   /* natural slope (SlopeNatural) */
+        0x02,   /* log stairs? (SlopeWood) */
+        0x03,   /* wooden stairs (SlopeWoodStair) */
+        0x00,   /* stone stairs (SlopeStoneStair) */
+        0x04,   /* brick stairs (SlopeBrickStair) */
+        0x01,   /* iron stairs (SlopeIronStair) */
+        0x1e,   /* blue wooden? (SlopeWoodBlue) */
+        0x1f,   /* blue iron stairs? (SlopeIronStairBlue) */
+    };
+
+    bool ApplyInclinePick(int rec, int which) {
+        u8* recs = BuildingRecords();
+        if (!recs || rec < 0 || rec >= 47 || which < 0 || which >= (int)(sizeof(k_InclineIds) / 2) || s_BridgeSwap.frames >= 0) return false;
+        s16* r = reinterpret_cast<s16*>(recs + rec * 0x14);
+        if (r[0] != InclineBuildingType) return false;
+        u16* id = reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset);
+        u16 oldId = *id, newId = k_InclineIds[which];
+        if (oldId == newId) return true;
+        *id = newId;
+        Log("bridges: incline record %d id %x -> %x", rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
     }
