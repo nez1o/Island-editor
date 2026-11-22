@@ -171,7 +171,15 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   *(player+0x4c8)+0x2e8 (flags +0x2e4..6) and the live position player+0x29a0. Exit is seamless. Pressing B first snaps the cursor to the
   area middle (not through `0x13d5d30`) while the edit camera still runs; the camera then keeps the last real spot
   (`s_EditClosing`), otherwise it swung to the map middle for a moment.
-- Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)`.
+- Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)` (its last argument is unused).
+- Screen-change wipe: opening and closing the editor play HHP's interior wipe, ~1.2 s each way. The wipe page holds
+  five layouts at +0x218..+0x238 (WipeInterior, Studio, WherearenIslands, CloudIsland, HotelRoom); +0x244 = the
+  one in use (2 here), +0x248 = command run by its update `0x2cb73d0` (handlers `0x2cb5bc4` / `0x2cb5dc0` /
+  `0x2cb5ed4`, page in x19). Each starts the animation and sets its speed (`fmov s0, #1.0`, vfunc +0x190). On the
+  editor map with index 2, a float inline hook on those `ldr x8, [x8, #0x190]` (`0x2cb5c88`, `0x2cb5e80`,
+  `0x2cb5f98`, `0x2cb75fc`) makes it 12x: the wipe is near-instant and the game's wipe logic is unchanged.
+  Careful when probing this page: its code also runs during loading, and a probe that logged there hung the boot;
+  exlaunch's InlineCtx has only x0..x30 (X[31] is not sp), so don't walk the stack from it.
 - **Buildings**: HHP house hover `0x13cef20` -> gate `0x13cfd7c` (inline) -> lookup `0x13d0308` -> `0x13f1bc4` ->
   edit object `0x13ba988`. The mod supplies a fake component (copy of game vtable `0x49a5880`, own slots for pos /
   grab / cancel / drag / valid / drop). Records: `0x1260490(list, i)` (returns via x8). Collision follows via

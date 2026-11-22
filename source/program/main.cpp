@@ -2537,7 +2537,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-test4 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-test5 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2930,6 +2930,22 @@ HOOK_DEFINE_INLINE(ThemeBannerHide) {
             *flag &= ~1;
             sl::Log("island editor: theme banner hidden");
         }
+    }
+};
+
+/* The island editor's screen change plays HHP's interior wipe (~1.2 s each way). The wipe page
+   (x19 in its command handlers 0x2cb5bc4 / 0x2cb5dc0 / 0x2cb5ed4 and its update 0x2cb73d0) holds
+   five wipe layouts, +0x244 = the one in use (2 = WipeInteriorWherearenIslands); each handler
+   starts an animation and sets its speed with s0 = 1.0 through vfunc +0x190. On the island editor
+   map that wipe runs WipeSpeed times faster, so the screen changes almost at once while the game's
+   own wipe logic (and whatever waits for it) runs as before. Door and other wipes are untouched. */
+constexpr float WipeSpeed = 12.0f;
+HOOK_DEFINE_INLINE(EditorWipeSpeed) {
+    static void Callback(exl::hook::InlineFloatCtx* ctx) {
+        u8* page = reinterpret_cast<u8*>(ctx->X[19]);
+        if (!page || !sl::EditorMap()) return;
+        if (*reinterpret_cast<const u32*>(page + 0x244) != 2) return;
+        ctx->S[0] = WipeSpeed;
     }
 };
 
@@ -3339,6 +3355,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     RiverDigExit::InstallAtOffset(0x2295320);
     RiverBuryExit::InstallAtOffset(0x22954c4);
     ThemeBannerHide::InstallAtOffset(0x345d81c);
+    /* the speed setter right after "fmov s0, #1.0" in each wipe command */
+    for (u32 off : { 0x2cb5c88u, 0x2cb5e80u, 0x2cb5f98u, 0x2cb75fcu }) EditorWipeSpeed::InstallAtOffset(off);
 }
 
 extern "C" NORETURN void exl_exception_entry() {
