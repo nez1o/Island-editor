@@ -169,13 +169,15 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         if any(k in s['name'] or k in s['material']['name'] for k in skip): continue
         alb = next((t for t in s['material']['tex'] if t.endswith('_Alb')), s['material']['tex'][0] if s['material']['tex'] else None)
         tex = texs.get(alb)
+        mn = s['material']['name']
+        flat = (104, 168, 78) if 'Grass' in mn else (148, 118, 84) if 'Cliff' in mn else (180, 170, 160)
         vp = [view(p) for p in s['pos']]
         for i in range(0, len(s['idx']) - 2, 3):
             a, b, c = s['idx'][i:i + 3]
             u1 = s['uv1'] or s['uv'] or [(0, 0)] * len(s['pos'])
             tris.append((vp[a], vp[b], vp[c], s['pos'][a], s['pos'][b], s['pos'][c],
                          s['uv'][a] if s['uv'] else (0, 0), s['uv'][b] if s['uv'] else (0, 0), s['uv'][c] if s['uv'] else (0, 0), tex,
-                         u1[a], u1[b], u1[c]))
+                         u1[a], u1[b], u1[c], flat))
     if not tris: return None
     xs = [v[0] for t in tris for v in t[:3]]; ys = [v[1] for t in tris for v in t[:3]]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
@@ -193,7 +195,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     light = (-0.45, 0.8, 0.4); ln = math.sqrt(sum(v * v for v in light)); light = tuple(v / ln for v in light)
     def strip(p):   # the atlas' saturated cyan / green / blue column: shader data, not a colour
         return max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150 or p[0] + p[1] + p[2] < 24
-    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1 in tris:
+    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat in tris:
         # face normal (model space) for lighting
         e1 = [pb[i] - pa[i] for i in range(3)]; e2 = [pc[i] - pa[i] for i in range(3)]
         n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
@@ -229,8 +231,8 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                         v = w0 * ua1[1] + w1 * ub1[1] + w2 * uc1[1]
                         r, g, b, _a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
                         if strip((r, g, b)): r, g, b = base[id(tex)]
-                else:
-                    r, g, b = 180, 170, 160
+                else:                               # texture lives in a shared archive: plain colour by material
+                    r, g, b = flat
                 zbuf[y][x] = z
                 col[y][x] = (r, g, b, shade)
     out = []
