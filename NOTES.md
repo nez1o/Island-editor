@@ -191,7 +191,9 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   the repo). Bridges: building records of type 26, record +8 = NHSE `BridgeType` (material x size,
   `k_BridgeIds`); inclines: type 27, +8 = NHSE `SlopeType` (`k_InclineIds`). A pick writes the save record
   and the land list entry, feeds the building spawner, deletes the old actor a few frames later, and
-  re-ticks the grid (`0x340de50`).
+  re-ticks the grid (`0x340de50`). Hovering a cell shows the game's kit name in the cell bubble:
+  `0x340b370` (hover -> bubble) runs as the roof tab with made-up ids 60000+ / 60010+, whose
+  `STR_HouseRoofName` entries `bridges_tab.py` copies from `Item/STR_ItemName_85_BridgeSlope`.
   - Closing the editor restores its opening snapshot of the island: `KeepOverrides` writes the new id back
     each frame when a record shows up at its old id, so the swap is what gets saved.
   - Walk shape: each building has a slot at FieldMgr+0x26e8 (+0x10 on play modes 1/0x32, else +0x6dc8;
