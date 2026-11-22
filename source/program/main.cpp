@@ -2003,18 +2003,24 @@ namespace sl {
     static u64 s_ShapePending = 0;
     static int s_ShapeWait = 0;
 
-    [[maybe_unused]] static void RebuildShapes() {   /* not used: removing the slot of a bridge
-        drops its collision and 0x2a3a450 doesn't create bridges (its type lookup gives 0) */
+    /* (Removing and re-creating the building slot, 0x2a3cfa0 / 0x2a3a450, gives a bridge a
+       house-style collision box: you can't walk onto it.) */
+    constexpr u32 LandBuildingRefresh = 0x12620a0;
+
+    static void RebuildShapes() {
         if (!s_ShapePending) { s_ShapeWait = 0; return; }
         if (!s_EditorClosed || !EditorMapStage()) { s_ShapeWait = 0; return; }   /* editor still open */
         if (++s_ShapeWait < 20) return;                                                 /* let the closing settle */
-        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
-        if (!field) return;
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!list) return;
         for (int i = 0; i < 47; i++) {
             if (!(s_ShapePending >> i & 1)) continue;
-            reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, PlayModeHash());
-            reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, (u32)i, PlayModeHash(), 0, 0, 0, 0, 0);
-            Log("bridges: walkable shape of record %d rebuilt (play mode %x)", i, PlayModeHash());
+            /* 0x12620a0(list, i): rebuild building i's runtime block (+0x48038, 0x718 each) from
+               its record (0x2a5df60) and mark its tiles for a walkable-surface refresh */
+            reinterpret_cast<void (*)(u8*, u32)>(Main(LandBuildingRefresh))(list, (u32)i);
+            Log("bridges: walkable shape of record %d refreshed", i);
         }
         s_ShapePending = 0;
         s_ShapeWait = 0;
@@ -2067,6 +2073,7 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
+        RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
