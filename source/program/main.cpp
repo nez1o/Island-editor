@@ -1700,6 +1700,32 @@ namespace sl {
     constexpr u32 NoneItemGot    = 0x4ab37e0;
     constexpr u32 IconKindShape  = 0x1b;
 
+    /* Name bubble on a hovered cell: 0x340b370(menu, event) shows it for the roof / wall / door
+       tabs from the tab's id list (roofs: count +0x1c4e0, u16* +0x1c4e8) and the message
+       STR_HouseRoofName "%05d" of the id, and hides it on other tabs. On our tabs it runs as the
+       roof tab with a list of made-up ids 60000+ (bridges) / 60010+ (inclines), whose names
+       bridges_tab.py adds to STR_HouseRoofName (the game's bridge / incline kit names). */
+    constexpr u32 CellNameOff  = 0x1c4e0;
+    static const u16 k_BridgeNameIds[8]  = { 60000, 60001, 60002, 60003, 60004, 60005, 60006, 60007 };
+    static const u16 k_InclineNameIds[8] = { 60010, 60011, 60012, 60013, 60014, 60015, 60016, 60017 };
+
+    void HomeCellName(u8* menu, void* ev, void (*orig)(u8*, void*)) {
+        u32& tab = *reinterpret_cast<u32*>(menu + MenuTabIndex);
+        if (!EditorMap() || (tab != (u32)BridgeTab && tab != (u32)InclineTab)) { orig(menu, ev); return; }
+        u32 savedTab = tab;
+        u32& count = *reinterpret_cast<u32*>(menu + CellNameOff);
+        const u16*& ids = *reinterpret_cast<const u16**>(menu + CellNameOff + 8);
+        u32 savedCount = count;
+        const u16* savedIds = ids;
+        tab = 1;
+        count = 8;
+        ids = savedTab == (u32)BridgeTab ? k_BridgeNameIds : k_InclineNameIds;
+        orig(menu, ev);
+        tab = savedTab;
+        count = savedCount;
+        ids = savedIds;
+    }
+
     bool HomeGridPicture(u8* menu, const s32* ev) {
         if (!menu || !ev || !EditorMap()) return false;
         /* the grid fills once the tab bar exists: lay the bar out for our tab count here too */
@@ -2999,6 +3025,12 @@ HOOK_DEFINE_TRAMPOLINE(HomeGridFill) {
 };
 
 /* House menu: the grid's picture delegate (op 0 = show an item in a cell). */
+HOOK_DEFINE_TRAMPOLINE(HomeCellName) {
+    static void Callback(u8* menu, void* ev) {
+        sl::HomeCellName(menu, ev, [](u8* m, void* e) { Orig(m, e); });
+    }
+};
+
 HOOK_DEFINE_TRAMPOLINE(HomeGridPicture) {
     static void Callback(u8* menu, const s32* ev, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         if (sl::HomeGridPicture(menu, ev)) return;
@@ -3228,6 +3260,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     TabStripStart::InstallAtOffset(0x3036ca0);
     HomeGridPick::InstallAtOffset(0x340c1d0);
     HomeGridPicture::InstallAtOffset(0x340d5b0);
+    HomeCellName::InstallAtOffset(0x340b370);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
     CliffReadyExec::InstallAtOffset(0x229dcd8);

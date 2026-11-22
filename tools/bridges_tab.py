@@ -246,6 +246,14 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None, pictures
     return sizes
 
 
+# Name bubble of each grid cell (grid order = k_BridgeIds rows / k_InclineIds in main.cpp): labels of
+# the kit items in Item/STR_ItemName_85_BridgeSlope.
+CELL_NAMES_BRIDGE = ['BridgeItem_05917', 'BridgeItem_05913', 'BridgeItem_05912', 'BridgeItem_05914',  # log, suspension, stone, wooden
+                     'BridgeItem_05915', 'BridgeItem_05919', 'BridgeItem_05916', 'BridgeItem_05918']  # brick, iron, zen, red zen
+CELL_NAMES_INCLINE = ['SlopeItem_05866', 'SlopeItem_05865', 'SlopeItem_05867', 'SlopeItem_05863',     # natural, white-plank, log, stone
+                      'SlopeItem_05870', 'SlopeItem_05864', 'SlopeItem_05868', 'SlopeItem_05869']    # brick, red steel, blue-plank, blue steel
+
+
 # ---------------------------------------------------------------- build
 def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read, msbt_write, langs=('USen', 'EUen')):
     """Writes the files into <out>; returns {rstb path: decompressed size}."""
@@ -279,7 +287,22 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
         src = os.path.join(romfs, 'Message', 'String_%s.sarc.zs' % lang)
         mult, files = sarc_read(zs_read(src))
         files = [list(f) for f in files]
+        kit_names = {}
         for f in files:
+            if f[0] == 'Item/STR_ItemName_85_BridgeSlope.msbt':
+                kit_names = {e[0]: e for e in msbt_read(f[1])[3]}
+        for f in files:
+            if f[0] == 'STR_HouseRoofName.msbt':
+                # cell name bubbles of the extra tabs (main.cpp HomeCellName): the game's kit names
+                header, ngroups, asize, entries = msbt_read(f[1])
+                for base, items in ((60000, CELL_NAMES_BRIDGE), (60010, CELL_NAMES_INCLINE)):
+                    for i, item in enumerate(items):
+                        kit = kit_names[item]
+                        label = '%05d' % (base + i)
+                        assert not any(e[0] == label for e in entries)
+                        entries.append([label, kit[1], kit[2]])
+                f[1] = msbt_write(header, ngroups, asize, entries)
+                continue
             if f[0] != 'STR_CategoryName.msbt': continue
             header, ngroups, asize, entries = msbt_read(f[1])
             like = [e for e in entries if e[0] == '1201'][0]        # "Roof": same attributes
