@@ -161,10 +161,14 @@ manager (`*(main+0x4ca7238)+0x65838`, 2 x 0x14c) and NOPs `0x987e14` (`tbz w8,#0
 ### Island editor (`island_editor`)
 HHP's outdoor editor on the main island, from a phone app in the hidden DIY Recipes slot (3 or 4).
 - Make it run outside HHP: area check `0x13e44ac` -> true, request gate `0x32fa3b0` -> true, warp check `0x15dc334`,
-  edit area `0x13b8fc4` = whole island (grid x160..1280, z160..1120; 1 tile = 10 units, origin incl. the sea ring).
+  edit area `0x13b8fc4` = the whole map incl. the 1-acre sea ring (x10..1430, z10..1270; 1 tile = 10 units; the
+  island grid is x160..1280, z160..1120). The middle must stay (720, 640): closing is recognised by it.
 - Camera/cursor: look-at `0x7f9070` (Vec3 in s0-s2), centring `0x13d5d30`, start `0x13c97d0`, cursor 1.25x via misc
   params `0x13c9440`. Place anywhere: can-place `0x13ea4c0` -> yes.
-- Close: teleport to the cursor (warp check + target `0x2309d50`; also write saved pos player+0xba4).
+- Close: teleport to the cursor (warp check + target `0x2309d50`; also write saved pos player+0xba4), clamped to the
+  island grid so a cursor out at sea doesn't drop the player in the water. Pressing B first snaps the cursor to the
+  area middle (not through `0x13d5d30`) while the edit camera still runs; the camera then keeps the last real spot
+  (`s_EditClosing`), otherwise it swung to the map middle for a moment.
 - Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)`.
 - **Buildings**: HHP house hover `0x13cef20` -> gate `0x13cfd7c` (inline) -> lookup `0x13d0308` -> `0x13f1bc4` ->
   edit object `0x13ba988`. The mod supplies a fake component (copy of game vtable `0x49a5880`, own slots for pos /

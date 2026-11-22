@@ -498,7 +498,11 @@ namespace sl {
     constexpr u32 FtrEditLayoutVtable  = 0x48a6a48;
     constexpr u32 LayoutCursor         = 0xa3c;      /* Vec3f; copies at +0xa30, +0xa48, +0xf10 */
     constexpr u32 PlayerPos            = 0x29a0;     /* player actor: live position (Vec3f) */
-    constexpr float EditMinX = 160.0f, EditMinZ = 160.0f, EditMaxX = 1280.0f, EditMaxZ = 1120.0f;
+    /* The cursor may go over the whole map, the 1-acre sea ring around the island included
+       (0..1440 x 0..1280, 10 units in from the edge). The middle stays (720, 640): the closing
+       re-centre is recognised by it. The player is only ever put back on the island grid. */
+    constexpr float EditMinX = 10.0f, EditMinZ = 10.0f, EditMaxX = 1430.0f, EditMaxZ = 1270.0f;
+    constexpr float IslandMinX = 160.0f, IslandMinZ = 160.0f, IslandMaxX = 1280.0f, IslandMaxZ = 1120.0f;
     constexpr u32 UiMgrGlobal          = 0x55b6f18;  /* the D-pad handler's UI request target */
     constexpr u32 UiRequest            = 0x2df7b98;  /* (mgr, scene id, {player index byte}, 0) */
     constexpr u32 ExteriorEditScene    = 0x6f;
@@ -517,6 +521,7 @@ namespace sl {
     static bool s_WarpArmed     = false;    /* editor has run: closing it may warp the player */
     static float s_WarpX = 0, s_WarpZ = 0;  /* cursor before closing re-centres it */
     static bool s_EditorClosed = false;     /* the editor just closed (its warp ran) */
+    static bool s_EditClosing = false;      /* closing: the cursor was re-centred, camera stays put */
     static bool s_EditorPending = false;    /* app tapped: open the editor once the phone is gone */
     static int s_EditorSlot     = -1;       /* app id shown as the editor (3 or 4) */
     static const char* s_DiyLabel[2] = {};  /* the DIY apps' own name labels and icon frames */
@@ -554,6 +559,7 @@ namespace sl {
     void EditStart(u8* layout) {
         s_WarpArmed = false;
         s_EditorClosed = false;
+        s_EditClosing = false;
         s_EditLayout = layout;
         s_CursorToPlayer = EditorMap();
         if (!s_CursorToPlayer) SetCursorSpeed(layout, false);   /* rooms keep the normal speed */
@@ -568,6 +574,7 @@ namespace sl {
         if (!s_WarpArmed || layout != s_EditLayout || !LiveLayout(layout)) return;
         const Vec3f* c = reinterpret_cast<const Vec3f*>(layout + LayoutCursor);
         s_WarpX = c->x; s_WarpZ = c->z;
+        s_EditClosing = true;   /* the camera keeps looking here, not at the re-centred cursor */
     }
 
     void EditCursorStart(u8* layout) {
@@ -627,7 +634,13 @@ namespace sl {
     bool EditorWarpTarget(Vec3f* out) {
         if (!EditorMap() || !s_WarpArmed || !LiveLayout(s_EditLayout)) return false;
         s_WarpArmed = false;
-        Vec3f c = { s_WarpX, 0.0f, s_WarpZ };
+        /* The cursor may be out at sea: the player goes to the nearest spot on the island grid. */
+        float wx = s_WarpX, wz = s_WarpZ;
+        if (wx < IslandMinX + 5) wx = IslandMinX + 5;
+        if (wx > IslandMaxX - 5) wx = IslandMaxX - 5;
+        if (wz < IslandMinZ + 5) wz = IslandMinZ + 5;
+        if (wz > IslandMaxZ - 5) wz = IslandMaxZ - 5;
+        Vec3f c = { wx, 0.0f, wz };
         c.y = reinterpret_cast<float (*)(float, float*, u32*, u64)>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, &c.x, nullptr, 0);
         *out = c;
         if (s_LocalPlayer) {
@@ -657,6 +670,9 @@ namespace sl {
             float mx = (EditMinX + EditMaxX) * 0.5f, mz = (EditMinZ + EditMaxZ) * 0.5f;
             bool centre = c->x - mx > -1 && c->x - mx < 1 && c->z - mz > -1 && c->z - mz < 1;
             if (!s_WarpArmed || !centre) { s_WarpX = c->x; s_WarpZ = c->z; }
+            /* Closing (B) puts the cursor on the area middle while the edit camera still runs, which
+               swung the camera across the map for a moment (seen in Eden): it stays on the last spot. */
+            else if (s_WarpArmed && centre) s_EditClosing = true;
             s_WarpArmed = true;
         }
         if ((s_EditOpening || s_CursorToPlayer || !LiveLayout(s_EditLayout)) && s_LocalPlayer) {
@@ -665,6 +681,7 @@ namespace sl {
         }
         if (!LiveLayout(s_EditLayout)) return false;
         *out = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        if (s_EditClosing) { out->x = s_WarpX; out->z = s_WarpZ; }   /* not the re-centred spot */
         return true;
     }
 
@@ -2512,7 +2529,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-test - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-test3 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
