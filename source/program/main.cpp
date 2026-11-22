@@ -1907,6 +1907,50 @@ namespace sl {
         s_BridgeSwap = { (u32)idx, newH, 0 };
     }
 
+    /* The walkable surface of a bridge / incline: the body's setup 0x2a81bf0(body, record) gives
+       it a collision in the field's structure slots (FieldMgr +0x26f8 on the island's play modes,
+       else +0x94b0; +8 + index * 0x208, the slot's object pointer at +8) - but only when that slot
+       is empty. A respawned bridge found the old one's surface still there, so it kept the old
+       height. Once the old actor is gone: unregister the slot's collision (0x8392c8, as the
+       building-slot removal does), empty it and run the setup again for the new body. */
+    constexpr u32 StructureSetup   = 0x2a81bf0;
+    constexpr u32 CollisionUnreg   = 0x8392c8;
+    constexpr u32 PlayModeTableGot = 0x4abbf90;
+    struct SurfaceRedo { u32 idx, body; int frames; };
+    static SurfaceRedo s_SurfaceRedo = { 0, 0, -1 };
+
+    static u8* StructureSlot(u32 idx) {
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* tbl = *reinterpret_cast<u8**>(Main(PlayModeTableGot));
+        if (!field || !tbl || idx > 0x35) return nullptr;
+        u32 h = PlayModeHash(), mi = 0;
+        for (u32 i = 0; i < 0x39; i++) if (reinterpret_cast<u32*>(tbl + 8)[i] == h) { mi = i; break; }
+        return field + ((mi == 0x32 || mi == 1) ? 0x26f8 : 0x94b0) + 8 + idx * 0x208;
+    }
+
+    static void RedoSurface() {
+        SurfaceRedo& r = s_SurfaceRedo;
+        if (r.frames < 0 || ++r.frames < 15) return;
+        r.frames = -1;
+        u8* body = ActorOfHandle(r.body);
+        u8* slot = StructureSlot(r.idx);
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!body || !slot || !list) { Log("bridges: surface redo skipped (%p %p %p)", body, slot, list); return; }
+        using UnregFn = void (*)(u8*);
+        u8* obj = *reinterpret_cast<u8**>(slot + 8);
+        if (obj) {
+            if (obj[0xa0]) reinterpret_cast<UnregFn>(Main(CollisionUnreg))(obj);
+            obj = *reinterpret_cast<u8**>(slot + 8);
+            if (obj && obj[0xa0]) reinterpret_cast<UnregFn>(Main(CollisionUnreg))(obj);
+            *reinterpret_cast<u8**>(slot + 8) = nullptr;
+        }
+        BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, r.idx);
+        reinterpret_cast<u64 (*)(u8*, u8*)>(Main(StructureSetup))(body, record.raw);
+        Log("bridges: walkable surface of record %d rebuilt (slot %s)", (int)r.idx, *reinterpret_cast<u8**>(slot + 8) ? "filled" : "still empty");
+    }
+
     /* A few frames after a respawn: the old bridge is the other actor of the new one's class with
        the same record index. If there is none, the new actor goes instead (never two bridges). */
     static void FinishBridgeSwap() {
@@ -1929,6 +1973,7 @@ namespace sl {
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
         if (u8* ob = ActorOfHandle(oldH)) {
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
+            s_SurfaceRedo = { w.idx, w.newH, 0 };
             /* (Rebuilding the building slot here left no collision at all, so the walkable shape
                keeps the old look's until the island reloads - entering a building and coming back
                out rebuilds it from the save, which has the new look.) */
@@ -2007,7 +2052,7 @@ namespace sl {
        house-style collision box: you can't walk onto it.) */
     constexpr u32 LandBuildingRefresh = 0x12620a0;
 
-    static void RebuildShapes() {
+    [[maybe_unused]] static void RebuildShapes() {   /* (didn't change the walk height) */
         if (!s_ShapePending) { s_ShapeWait = 0; return; }
         if (!s_EditorClosed || !EditorMapStage()) { s_ShapeWait = 0; return; }   /* editor still open */
         if (++s_ShapeWait < 20) return;                                                 /* let the closing settle */
@@ -2073,7 +2118,7 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
-        RebuildShapes();
+        RedoSurface();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
