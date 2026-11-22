@@ -2479,10 +2479,67 @@ namespace sl {
     alignas(0x1000) static u8 s_ThreadStack[0x4000];
     static nn::os::ThreadType s_Thread;
 
+    /* Debug memory dump (for finding a bridge's walkable surface): when sd:/slumbertoggle/dump.txt
+       exists, holding "<label> <record index>", the watch thread writes dump_<label>.bin and deletes
+       dump.txt. Layout: "DUMP" u32 count, then sections { char name[16], u64 address, u64 size,
+       bytes }: the island building list object, its runtime blocks, the field manager object,
+       the island land object and the save record. */
+    constexpr const char* DumpReqPath = "slsd:/slumbertoggle/dump.txt";
+
+    static void DumpSection(nn::fs::FileHandle h, s64& pos, const char* name, const void* addr, u64 size) {
+        char hdr[32] = {};
+        snprintf(hdr, 16, "%s", name);
+        u64 a = (u64)(uintptr_t)addr;
+        memcpy(hdr + 16, &a, 8); memcpy(hdr + 24, &size, 8);
+        nn::fs::WriteFile(h, pos, hdr, 32, nn::fs::WriteOption::CreateOption(0)); pos += 32;
+        if (addr && size) { nn::fs::WriteFile(h, pos, addr, size, nn::fs::WriteOption::CreateOption(0)); pos += size; }
+    }
+
+    static void DumpIfRequested() {
+        nn::fs::FileHandle h;
+        if (R_FAILED(nn::fs::OpenFile(&h, DumpReqPath, nn::fs::OpenMode_Read))) return;
+        char buf[64] = {};
+        long size = 0;
+        nn::fs::GetFileSize(&size, h);
+        if (size > 63) size = 63;
+        nn::fs::ReadFile(h, 0, buf, size);
+        nn::fs::CloseFile(h);
+        nn::fs::DeleteFile(DumpReqPath);
+        char label[24] = "x"; int idx = 21;
+        sscanf(buf, "%23s %d", label, &idx);
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* recs = BuildingRecords();
+        char path[96];
+        snprintf(path, sizeof(path), "slsd:/slumbertoggle/dump_%s.bin", label);
+        u64 blocksN = list ? *reinterpret_cast<u32*>(list + 0x48030) : 0;
+        u8* blocks = list ? *reinterpret_cast<u8**>(list + 0x48038) : nullptr;
+        u64 total = 8 + 6 * 32 + (list ? 0x48048 : 0) + (blocks ? blocksN * 0x718 : 0) + (field ? 0x20000 : 0) + (island ? 0x400 : 0) + (recs ? 47 * 0x14 : 0) + (land ? 0x400 : 0);
+        nn::fs::DeleteFile(path);
+        nn::fs::CreateFile(path, (s64)total);
+        if (R_FAILED(nn::fs::OpenFile(&h, path, nn::fs::OpenMode_Write))) { Log("dump: can't write %s", path); return; }
+        s64 pos = 0;
+        u32 hdr[2] = { 0x504d5544, 6 };
+        nn::fs::WriteFile(h, pos, hdr, 8, nn::fs::WriteOption::CreateOption(0)); pos += 8;
+        DumpSection(h, pos, "list", list, list ? 0x48048 : 0);
+        DumpSection(h, pos, "blocks", blocks, blocks ? blocksN * 0x718 : 0);
+        DumpSection(h, pos, "field", field, field ? 0x20000 : 0);
+        DumpSection(h, pos, "island", island, island ? 0x400 : 0);
+        DumpSection(h, pos, "records", recs, recs ? 47 * 0x14 : 0);
+        DumpSection(h, pos, "land", land, land ? 0x400 : 0);
+        nn::fs::FlushFile(h);
+        nn::fs::CloseFile(h);
+        Log("dump: wrote %s (%ld bytes, record %d id %x)", path, (long)pos, idx,
+            recs ? *reinterpret_cast<u16*>(recs + idx * 0x14 + 8) : 0);
+    }
+
     static void WatchThread(void*) {
         while (true) {
             nn::os::SleepThread(nn::TimeSpan::FromSeconds(1));
             FlushLog();
+            if (s_SdReady) DumpIfRequested();
             if (s_AppSave.exchange(false)) WriteDefaultToggles();   /* changes made in the Slumber app */
             if (ReadToggles()) ApplyAll();
             /* The real table is filled during boot; keep the terraforming copy in sync. */
