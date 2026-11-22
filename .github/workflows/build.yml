@@ -19,7 +19,8 @@ jobs:
       - name: Build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          bash ./exlaunch.sh build
+          aarch64-none-elf-gcc --version | head -1
+          make -j8 CXX_FLAGS=
           ls -la deploy
       - uses: actions/upload-artifact@v4
         with:
