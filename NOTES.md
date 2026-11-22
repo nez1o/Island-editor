@@ -53,6 +53,9 @@ Gotchas:
   v0.27 hooked a mid-function address and crashed after loading.
 - Never put GDB breakpoints on hot render functions (e.g. `0x146ab80`): a render thread hit one and crashed the
   game. Use read-only memory dumps for those.
+- **Hook pool**: every trampoline hook takes 200 bytes of the JIT area (`setting.hpp` `JitSize`). When it runs
+  out, exlaunch aborts in `AllocForTrampoline` at boot and the game sits on the loading screen (Eden log:
+  "Failed: AllocForTrampoline"). Raised to 0x8000 in v0.63 (~160 hooks).
 - Don't write the SD card from game threads (caused ~1 s hitches): `Log()` queues lines for the watch thread.
 
 ## Features: how they work
