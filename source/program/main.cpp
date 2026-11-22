@@ -516,6 +516,7 @@ namespace sl {
     static u8* s_LocalPlayer    = nullptr;  /* player actor seen by the button handler */
     static bool s_WarpArmed     = false;    /* editor has run: closing it may warp the player */
     static float s_WarpX = 0, s_WarpZ = 0;  /* cursor before closing re-centres it */
+    static bool s_EditorClosed = false;     /* the editor just closed (its warp ran) */
     static bool s_EditorPending = false;    /* app tapped: open the editor once the phone is gone */
     static int s_EditorSlot     = -1;       /* app id shown as the editor (3 or 4) */
     static const char* s_DiyLabel[2] = {};  /* the DIY apps' own name labels and icon frames */
@@ -552,6 +553,7 @@ namespace sl {
 
     void EditStart(u8* layout) {
         s_WarpArmed = false;
+        s_EditorClosed = false;
         s_EditLayout = layout;
         s_CursorToPlayer = EditorMap();
         if (!s_CursorToPlayer) SetCursorSpeed(layout, false);   /* rooms keep the normal speed */
@@ -637,6 +639,7 @@ namespace sl {
             }
         }
         Log("island editor: player moved to the cursor (%d, %d)", (int)c.x, (int)c.z);
+        s_EditorClosed = true;
         return true;
     }
 
@@ -1993,7 +1996,31 @@ namespace sl {
     static LookOverride s_Overrides[MaxOverrides];
     static int s_OverrideCount = 0;
 
+    /* Records whose walkable shape (collision / height, built per building slot from the record)
+       still has the old look's. It can't be rebuilt while the island editor runs (its play mode
+       builds nothing: the bridge lost all collision), so it is done once the editor has closed. */
+    static u64 s_ShapePending = 0;
+    static int s_ShapeWait = 0;
+
+    static void RebuildShapes() {
+        if (!s_ShapePending) { s_ShapeWait = 0; return; }
+        if (!s_EditorClosed || !EditorMapStage()) { s_ShapeWait = 0; return; }   /* editor still open */
+        if (++s_ShapeWait < 20) return;                                                 /* let the closing settle */
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        if (!field) return;
+        for (int i = 0; i < 47; i++) {
+            if (!(s_ShapePending >> i & 1)) continue;
+            reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, PlayModeHash());
+            reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, (u32)i, PlayModeHash(), 0, 0, 0, 0, 0);
+            Log("bridges: walkable shape of record %d rebuilt (play mode %x)", i, PlayModeHash());
+        }
+        s_ShapePending = 0;
+        s_ShapeWait = 0;
+        s_EditorClosed = false;
+    }
+
     static void RememberOverride(int idx, u16 oldId, u16 newId) {
+        s_ShapePending |= 1ull << idx;
         for (int i = 0; i < s_OverrideCount; i++)
             if (s_Overrides[i].idx == idx) {
                 if (s_Overrides[i].oldId == newId) { s_Overrides[i] = s_Overrides[--s_OverrideCount]; return; }  /* swapped back */
@@ -2018,12 +2045,7 @@ namespace sl {
                 *id = o.newId;
                 if (u8* e = LandBuildingEntry((u32)o.idx)) *reinterpret_cast<u16*>(e + BridgeIdOffset) = o.newId;
                 Log("bridges: record %d was put back to %x - set to %x again", (int)o.idx, o.oldId, o.newId);
-                /* the restore rebuilt the walkable shape from the old look: build it again */
-                if (u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal))) {
-                    reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)o.idx, PlayModeHash());
-                    reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, (u32)o.idx, PlayModeHash(), 0, 0, 0, 0, 0);
-                    Log("bridges: walkable shape of record %d rebuilt", (int)o.idx);
-                }
+                s_ShapePending |= 1ull << o.idx;   /* the restore rebuilt the old walkable shape */
             }
         }
     }
@@ -2043,6 +2065,7 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
+        RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
