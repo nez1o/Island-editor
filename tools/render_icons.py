@@ -201,6 +201,13 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         r, g, b = p[:3]
         return (g > 150 and g - r > 100) or (r < 70 and g > 120 and b > 120) or (r < 25 and b > 150 and b - g > 60) or r + g + b < 24
     blend_ch = int(os.environ.get('BLENDCH', str(blend)))
+    wrap_mode = os.environ.get('WRAP', 'repeat')
+    def wrap(t):
+        if wrap_mode == 'clamp': return min(max(t, 0.0), 0.9999)
+        if wrap_mode == 'mirror':
+            t = t % 2.0
+            return 2.0 - t if t > 1.0 else t
+        return t
     for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat, mix in tris:
         # face normal (model space) for lighting
         e1 = [pb[i] - pa[i] for i in range(3)]; e2 = [pc[i] - pa[i] for i in range(3)]
@@ -230,6 +237,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                 if tex:
                     u = w0 * ua[0] + w1 * ub[0] + w2 * uc[0]
                     v = w0 * ua[1] + w1 * ub[1] + w2 * uc[1]
+                    u, v = wrap(u), wrap(v)
                     r, g, b, a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
                     if a < 128: continue
                     if blend_ch >= 0 and mix:
