@@ -1850,6 +1850,7 @@ namespace sl {
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
             else ApplyInclinePick(s_MenuBridge, idx);
+            reinterpret_cast<void (*)(u8*)>(Main(0x340de50))(menu);   /* refill: the tick moves to the new look */
         } else if (idx >= 0) Log("bridges: point at a %s and press X to change it", want == BridgeBuildingType ? "bridge" : "incline");
         return true;
     }
@@ -2002,7 +2003,8 @@ namespace sl {
     static u64 s_ShapePending = 0;
     static int s_ShapeWait = 0;
 
-    static void RebuildShapes() {
+    [[maybe_unused]] static void RebuildShapes() {   /* not used: removing the slot of a bridge
+        drops its collision and 0x2a3a450 doesn't create bridges (its type lookup gives 0) */
         if (!s_ShapePending) { s_ShapeWait = 0; return; }
         if (!s_EditorClosed || !EditorMapStage()) { s_ShapeWait = 0; return; }   /* editor still open */
         if (++s_ShapeWait < 20) return;                                                 /* let the closing settle */
@@ -2065,7 +2067,6 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
-        RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
