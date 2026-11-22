@@ -2059,22 +2059,44 @@ namespace sl {
 
     /* (Removing and re-creating the building slot, 0x2a3cfa0 / 0x2a3a450, gives a bridge a
        house-style collision box: you can't walk onto it.) */
-    constexpr u32 LandBuildingRefresh = 0x12620a0;
+    [[maybe_unused]] constexpr u32 LandBuildingRefresh = 0x12620a0;
 
-    [[maybe_unused]] static void RebuildShapes() {   /* (didn't change the walk height) */
+    /* Rebuild a swapped bridge / incline's slot the way the game does at island load (the type
+       switch at 0x2981abc): BldSlotRemove (unmark its tiles, unregister the collision, empty the
+       slot), then the type's own slot builder - 0x2a3aef0 for bridges, 0x2a3b680 for inclines -
+       which reads the record's id, loads that model's collision (slot +0x100 / +0x1a8 name) and
+       re-marks the tiles (0x12620a0). (0x2a3a450 is the house builder: a box you can't walk on.) */
+    constexpr u32 BridgeSlotCreate  = 0x2a3aef0;
+    constexpr u32 InclineSlotCreate = 0x2a3b680;
+
+    static void RebuildShapes() {
         if (!s_ShapePending) { s_ShapeWait = 0; return; }
         if (!s_EditorClosed || !EditorMapStage()) { s_ShapeWait = 0; return; }   /* editor still open */
         if (++s_ShapeWait < 20) return;                                                 /* let the closing settle */
-        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
-        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
-        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
-        if (!list) return;
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* tbl = *reinterpret_cast<u8**>(Main(PlayModeTableGot));
+        u8* recs = BuildingRecords();
+        if (!field || !tbl || !recs) return;
+        u32 h = PlayModeHash(), mi = 0;
+        for (u32 i = 0; i < 0x39; i++) if (reinterpret_cast<u32*>(tbl + 8)[i] == h) { mi = i; break; }
+        if (mi != 1 && mi != 0x32) { if (s_ShapeWait == 20) Log("bridges: shape rebuild waits (play mode %u)", mi); s_ShapeWait = 19; return; }
+        using RemoveFn = void (*)(u8*, u32, u32);
+        using CreateFn = u64 (*)(u8*, u32, u32);
         for (int i = 0; i < 47; i++) {
             if (!(s_ShapePending >> i & 1)) continue;
-            /* 0x12620a0(list, i): rebuild building i's runtime block (+0x48038, 0x718 each) from
-               its record (0x2a5df60) and mark its tiles for a walkable-surface refresh */
-            reinterpret_cast<void (*)(u8*, u32)>(Main(LandBuildingRefresh))(list, (u32)i);
-            Log("bridges: walkable shape of record %d refreshed", i);
+            s16 type = *reinterpret_cast<s16*>(recs + i * 0x14);
+            u16 id = *reinterpret_cast<u16*>(recs + i * 0x14 + BridgeIdOffset);
+            if (type != BridgeBuildingType && type != InclineBuildingType) continue;
+            u8* slot = field + 0x26f8 + 8 + i * 0x208;
+            const char* oldName = type == BridgeBuildingType ? reinterpret_cast<const char*>(slot + 0x114)
+                                                             : *reinterpret_cast<const char**>(slot + 0x1b0);
+            Log("bridges: rebuilding shape of record %d (type %d id %x), was '%.40s'", i, type, id, oldName ? oldName : "?");
+            reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
+            u64 ret = reinterpret_cast<CreateFn>(Main(type == BridgeBuildingType ? BridgeSlotCreate : InclineSlotCreate))(field + BldSlotOffset, (u32)i, h);
+            const char* newName = type == BridgeBuildingType ? *reinterpret_cast<const char**>(slot + 0x108)
+                                                             : *reinterpret_cast<const char**>(slot + 0x1b0);
+            Log("bridges: shape rebuilt (ret %d, slot obj %p, now '%.40s')", (int)(ret & 1),
+                *reinterpret_cast<u8**>(slot + 8), newName ? newName : "?");
         }
         s_ShapePending = 0;
         s_ShapeWait = 0;
@@ -2127,6 +2149,7 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         KeepOverrides();
+        RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
@@ -2561,7 +2584,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.63-test (bridges) - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.63-test2 (bridges) - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
