@@ -2537,7 +2537,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-test5 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-test7 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2939,7 +2939,7 @@ HOOK_DEFINE_INLINE(ThemeBannerHide) {
    starts an animation and sets its speed with s0 = 1.0 through vfunc +0x190. On the island editor
    map that wipe runs WipeSpeed times faster, so the screen changes almost at once while the game's
    own wipe logic (and whatever waits for it) runs as before. Door and other wipes are untouched. */
-constexpr float WipeSpeed = 12.0f;
+constexpr float WipeSpeed = 120.0f;
 HOOK_DEFINE_INLINE(EditorWipeSpeed) {
     static void Callback(exl::hook::InlineFloatCtx* ctx) {
         u8* page = reinterpret_cast<u8*>(ctx->X[19]);

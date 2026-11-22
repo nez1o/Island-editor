@@ -177,7 +177,7 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   one in use (2 here), +0x248 = command run by its update `0x2cb73d0` (handlers `0x2cb5bc4` / `0x2cb5dc0` /
   `0x2cb5ed4`, page in x19). Each starts the animation and sets its speed (`fmov s0, #1.0`, vfunc +0x190). On the
   editor map with index 2, a float inline hook on those `ldr x8, [x8, #0x190]` (`0x2cb5c88`, `0x2cb5e80`,
-  `0x2cb5f98`, `0x2cb75fc`) makes it 12x: the wipe is near-instant and the game's wipe logic is unchanged.
+  `0x2cb5f98`, `0x2cb75fc`) makes it 120x (12x and 30x were still visible): the wipe finishes in one frame and the game's wipe logic is unchanged.
   Careful when probing this page: its code also runs during loading, and a probe that logged there hung the boot;
   exlaunch's InlineCtx has only x0..x30 (X[31] is not sp), so don't walk the stack from it.
 - **Buildings**: HHP house hover `0x13cef20` -> gate `0x13cfd7c` (inline) -> lookup `0x13d0308` -> `0x13f1bc4` ->
