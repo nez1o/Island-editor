@@ -942,18 +942,28 @@ namespace sl {
     /* 0x13d0308 on the main island: the building whose footprint holds the cursor cell
        (query +8 / +0xc, 5-unit cells). Fills the full rect (out) and the min cell (minOut) like
        the game. Returns the body's actor handle or 0. */
-    static void BridgeProbe(float x, float z);
+    static bool IsBridgeBody(u8* body);
+    constexpr float BridgeReach = 28.0f;   /* a bridge is up to 5 tiles long: hover within this of its middle */
 
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
         float cz = *reinterpret_cast<const s32*>(query + 0xc) * 5.0f + 2.5f;
         u8* body = nullptr;
         ForEachActor([&](u8* a) {
-            if (body || VtOf(a) != BuildingBodyVt) return;
+            if (body || VtOf(a) != BuildingBodyVt || IsBridgeBody(a)) return;
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
             if (cx >= p->x - 20 && cx < p->x + 20 && cz >= p->z - 25 && cz < p->z + 25) body = a;
         });
-        if (!body) { BridgeProbe(cx, cz); return 0; }
+        if (!body) {   /* bridges (building bodies too): within BridgeReach of the middle */
+            float best = BridgeReach * BridgeReach;
+            ForEachActor([&](u8* a) {
+                if (VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) return;
+                const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+                float d = (p->x - cx) * (p->x - cx) + (p->z - cz) * (p->z - cz);
+                if (d < best) { best = d; body = a; }
+            });
+        }
+        if (!body) return 0;
         BldComp* c = AttachComp(body);
         if (!c) return 0;
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
@@ -1476,9 +1486,12 @@ namespace sl {
     }
 
     /* 0x2a914b0: current design of the house (out: 16 bytes). */
+    bool BridgeDesignGet(u32 handle);
+
     bool HouseDesignGet(u8* out, u32 handle) {
         HouseExt e;
-        if (!out || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
+        if (!out || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return out && BridgeDesignGet(handle);
+        BridgeDesignGet(0);   /* a house: not on a bridge */
         u16* o = reinterpret_cast<u16*>(out);
         o[0] = StyleOf(e.ids[0]);
         o[1] = e.ids[0]; o[2] = e.ids[1]; o[3] = e.ids[2];
@@ -1488,9 +1501,10 @@ namespace sl {
 
     /* 0x2a91660: apply a design chosen in the menu to the house's save data. */
     bool BridgeTabOpen();
+    bool MenuOnBridge();
 
     bool HouseDesignSet(u32 handle, const u8* design) {
-        if (BridgeTabOpen()) { Log("bridges: pick on the Bridges tab ignored (grid not done yet)"); return true; }
+        if (BridgeTabOpen() || MenuOnBridge()) { Log("bridges: house pick ignored (menu on a bridge / Bridges tab)"); return true; }
         HouseExt e;
         if (!design || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
         const u16* d = reinterpret_cast<const u16*>(design);
@@ -1593,14 +1607,17 @@ namespace sl {
     static u8* s_HomeBar = nullptr;
 
     void HomeTabStrip(u8* strip, const void* desc) {
-        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip)
+        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) {
             s_HomeBar = *reinterpret_cast<u8**>(strip + 0x20);
+            Log("bridges: tab strip %p bar %p", strip, s_HomeBar);
+        }
     }
 
     void HomeTabBarCount(u8* bar, u32 count) {
+        if (s_HomeBar && EditorMap()) Log("bridges: bar %p count %d (menu bar %p)", bar, (int)count, s_HomeBar);
         if (!bar || bar != s_HomeBar || count < 1 || count > 6) return;
         u8* anim = *reinterpret_cast<u8**>(bar + 0x208);
-        if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
+        if (!anim || !*reinterpret_cast<u8**>(anim + 8)) { Log("bridges: bar has no CategoryNum anim"); return; }
         struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 0x14, 0 };
         u8* vt = *reinterpret_cast<u8**>(anim);
         u8* ft = *reinterpret_cast<u8**>(anim + 24);
@@ -1677,6 +1694,75 @@ namespace sl {
         return r[0] == BridgeBuildingType ? r : nullptr;
     }
 
+    static void LogRecord(const char* what, const u8* r);
+
+    /* Building body of a bridge: its record (body +0x174) has type 26. */
+    static bool IsBridgeBody(u8* body) {
+        u8* recs = BuildingRecords();
+        if (!recs || !body) return false;
+        u32 i = *reinterpret_cast<u32*>(body + ActorRecordIndex);
+        return i < 47 && *reinterpret_cast<s16*>(recs + i * 0x14) == BridgeBuildingType;
+    }
+
+    static int s_MenuBridge = -1;   /* record of the bridge the house menu was opened on, or -1 */
+    bool ApplyBridgePick(int rec, int material);
+
+    /* 0x2a914b0 for a bridge: the menu was opened on a bridge. The design stays "none" (0xffff),
+       the menu then starts on the Bridges tab (HomeTabStart). */
+    bool BridgeDesignGet(u32 handle) {
+        u8* a = ActorOfHandle(handle);
+        for (int i = 0; i < MaxHandleRemaps && !a && handle; i++)
+            if (s_RemapFrom[i] == handle) a = ActorOfHandle(s_RemapTo[i]);
+        if (!a || VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) { s_MenuBridge = -1; return false; }
+        s_MenuBridge = (int)*reinterpret_cast<u32*>(a + ActorRecordIndex);
+        LogRecord("menu on bridge", reinterpret_cast<u8*>(BridgeRecord(s_MenuBridge)));
+        return true;
+    }
+
+    bool MenuOnBridge() { return s_MenuBridge >= 0 && EditorMap(); }
+
+    /* 0x3036ca0(strip, owner, first tab): a menu opened on a bridge starts on the Bridges tab. */
+    u32 HomeTabStart(u8* strip, u32 first) {
+        if (!MenuOnBridge() || !strip || *reinterpret_cast<u8**>(strip + 0x20) != s_HomeBar) return first;
+        Log("bridges: menu opens on the Bridges tab");
+        return BridgeTab;
+    }
+
+    /* 0x340c1d0(menu, event): A on a grid cell. On the Bridges tab: which cell (the game's own
+       index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on. */
+    bool HomeGridPick(u8* menu, u8* event) {
+        if (!menu || !event || !EditorMap() || *reinterpret_cast<s32*>(menu + MenuTabIndex) != BridgeTab) return false;
+        u8* owner = *reinterpret_cast<u8**>(menu + 0x220);
+        u8* list = owner ? *reinterpret_cast<u8**>(owner + 0x578) : nullptr;
+        if (!list) return true;
+        void* cell = *reinterpret_cast<void**>(event + 8);
+        s32 n = *reinterpret_cast<s32*>(list + 0x208);
+        void** cells = *reinterpret_cast<void***>(list + 0x210);
+        s32 slot = -1;
+        for (s32 i = 0; i < n && cells; i++) if (cells[i] == cell) { slot = i; break; }
+        if (slot < 0) return true;
+        s32 cols = *reinterpret_cast<s32*>(list + 0x2e8);
+        s32 top = *reinterpret_cast<s32*>(list + 0x430) - *reinterpret_cast<s32*>(list + 0x438);
+        s32 row = cols ? slot / cols : 0;
+        if (!((list[1000] >> 1) & 1)) top += row;
+        else {
+            u32 lim = *reinterpret_cast<u32*>(list + 0x434);
+            u32 adj = (s32)lim < top ? ~lim : 0;
+            if (top < 0) adj = lim + 1;
+            s32 i3 = top + row + (s32)adj;
+            s32 wrap = *reinterpret_cast<s32*>(list + 0x3d0);
+            s32 i4 = wrap <= i3 ? wrap : 0;
+            if (-1 < i3) wrap = -i4;
+            top = wrap + i3;
+        }
+        s32 idx = top * cols - row * cols + slot;
+        if (idx < 0 || idx >= *reinterpret_cast<s32*>(list + 0x3cc)) idx = -1;
+        Log("bridges: cell %d picked (slot %d)", idx, slot);
+        if (idx >= 0 && MenuOnBridge()) ApplyBridgePick(s_MenuBridge, idx);
+        else if (idx >= 0) Log("bridges: menu is on a house - point at a bridge and press X");
+        return true;
+    }
+
     static void LogRecord(const char* what, const u8* r) {
         Log("bridges: %s %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x %02x%02x", what,
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]);
@@ -1724,34 +1810,6 @@ namespace sl {
             Log("bridges: old bridge not found - new look shows after a reload");
         }
         w.frames = -1;
-    }
-
-    /* Discovery (test build): with the editor cursor near a bridge record, log the record and the
-       actors carrying its index, once per bridge, to learn the bridge actor's class and position. */
-    static u64 s_BridgeProbed = 0;
-    static void BridgeProbe(float x, float z) {
-        u8* recs = BuildingRecords();
-        if (!recs) return;
-        for (int i = 0; i < 47; i++) {
-            s16* r = reinterpret_cast<s16*>(recs + i * 0x14);
-            if (r[0] != BridgeBuildingType || (s_BridgeProbed >> i & 1)) continue;
-            float dx = r[1] * 5.0f - x, dz = r[2] * 5.0f - z;
-            if (dx * dx + dz * dz > 25.0f * 25.0f) continue;
-            s_BridgeProbed |= 1ull << i;
-            LogRecord("probe record", reinterpret_cast<u8*>(r));
-            Log("bridges: probe record %d at (%d, %d), cursor (%d, %d)", i, r[1] * 5, r[2] * 5, (int)x, (int)z);
-            int n = 0;
-            ForEachActor([&](u8* a) {
-                if (*reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)i || n >= 12) return;
-                n++;
-                const float* f = reinterpret_cast<const float*>(a + 0x7f0);
-                const float* t = reinterpret_cast<const float*>(*reinterpret_cast<u8**>(a + ActorTransform));
-                Log("bridges: probe actor vt %x handle %x +7f0 (%d, %d, %d) part %x", VtOf(a), *reinterpret_cast<u32*>(a + 0x230),
-                    (int)f[0], (int)f[1], (int)f[2], PartPair(a));
-                (void)t;
-            });
-            if (!n) Log("bridges: probe found no actor with index %d", i);
-        }
     }
 
     /* Swap bridge record <rec> to <material>, keeping its size. */
@@ -2647,6 +2705,21 @@ HOOK_DEFINE_TRAMPOLINE(TabBarCount) {
     }
 };
 
+/* Tab strip: select the first tab. */
+HOOK_DEFINE_TRAMPOLINE(TabStripStart) {
+    static void Callback(u8* strip, u64 owner, u64 first, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        Orig(strip, owner, sl::HomeTabStart(strip, (u32)first), a3, a4, a5, a6, a7);
+    }
+};
+
+/* House menu: A on a grid cell. */
+HOOK_DEFINE_TRAMPOLINE(HomeGridPick) {
+    static void Callback(u8* menu, u8* event, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        if (sl::HomeGridPick(menu, event)) return;
+        Orig(menu, event, a2, a3, a4, a5, a6, a7);
+    }
+};
+
 /* House menu: the tab changed. */
 HOOK_DEFINE_TRAMPOLINE(HomeTabChanged) {
     static void Callback(u8* menu, u8* arg, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
@@ -2890,6 +2963,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     HomeTabChanged::InstallAtOffset(0x340b120);
     HomeGridFill::InstallAtOffset(0x340de50);
     TabBarCount::InstallAtOffset(0x2fe5370);
+    TabStripStart::InstallAtOffset(0x3036ca0);
+    HomeGridPick::InstallAtOffset(0x340c1d0);
     HomeGridPage::InstallAtOffset(0x340cf90);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
