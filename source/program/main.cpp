@@ -1947,8 +1947,15 @@ namespace sl {
             *reinterpret_cast<u8**>(slot + 8) = nullptr;
         }
         BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, r.idx);
-        reinterpret_cast<u64 (*)(u8*, u8*)>(Main(StructureSetup))(body, record.raw);
-        Log("bridges: walkable surface of record %d rebuilt (slot %s)", (int)r.idx, *reinterpret_cast<u8**>(slot + 8) ? "filled" : "still empty");
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* s1 = field + 0x26f8 + 8 + r.idx * 0x208, *s2 = field + 0x94b0 + 8 + r.idx * 0x208;
+        Log("bridges: setup in: body type %x idx %d, rec kind %x flags %x id %x; slots %p/%p (mine %p)",
+            *reinterpret_cast<u32*>(body + 0x550), *reinterpret_cast<u32*>(body + ActorRecordIndex),
+            *reinterpret_cast<u32*>(record.raw + 0xc), record.raw[8], *reinterpret_cast<u16*>(record.raw + 0x24),
+            *reinterpret_cast<u8**>(s1 + 8), *reinterpret_cast<u8**>(s2 + 8), slot);
+        u64 ret = reinterpret_cast<u64 (*)(u8*, u8*)>(Main(StructureSetup))(body, record.raw);
+        Log("bridges: setup returned %lx; slots now %p (reg %d) / %p", (unsigned long)ret,
+            *reinterpret_cast<u8**>(s1 + 8), s1[0x158], *reinterpret_cast<u8**>(s2 + 8));
     }
 
     /* A few frames after a respawn: the old bridge is the other actor of the new one's class with
