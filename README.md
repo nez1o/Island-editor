@@ -27,7 +27,7 @@ and `log.txt` says why.
 | `slumber_phone_app` | A "Gyroid's menu" NookPhone app with the settings screen (needs Nook Miles+) |
 | `fast_terraform` | Cliff and water building plays fast (`terraform_speed=1..60`) |
 | `slumber_hud` | Slumber's fence / helper / bag HUD and build modes (+) on your island |
-| `island_editor` | Happy Home Paradise's outdoor editor on your island: place items anywhere, move houses and buildings, edit house exteriors, change a bridge's look with X (test build) (needs HHP) |
+| `island_editor` | Happy Home Paradise's outdoor editor on your island: place items anywhere, move houses and buildings, edit house exteriors, change a bridge's or incline's look with X in extra tabs of the house menu (needs HHP) |
 | `unlock_all` | All phone apps, construction permits and HHP unlocks |
 | `cliff_stack` | The cliff tool stacks a cliff on a flush edge, instantly, with solid walls |
 | `slumber_terraform`, `terraform_near_trees` | Experimental, off by default |

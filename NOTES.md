@@ -183,18 +183,25 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   +0x50 size, +0x58 flag (bit 0 visible), +0x59 alpha, +0xb0 name. Found with read watchpoints on the
   `OneRoom_ThemeName` string in Eden (`work-tools/eden_gdb.py`; static xrefs missed this site), then a logging
   build that walked the pane tree.
-- **Bridges picker** (v0.63-test, NOT yet tested in game): in the editor, X with the cursor near a bridge
-  (and not on a house) opens the module's own panel (`slumber_app.cpp`, page `Bridges`: one "Bridges" tab
-  and a 4x2 grid of pictures from `bridge_icons.inc`, made by `tools/bridge_icons.py`, no game art). A pick
-  keeps the bridge's size and swaps its material. Bridges are building records of type 26; record +8 is the
-  bridge id = material x {3, 4, 5 long, diagonal 2.5 / 3.0 / 3.5} (NHSE's `BridgeType` numbering,
-  table `k_BridgeIds` in `main.cpp`). The record is changed in the save, then the building spawner is fed
-  it; a few frames later the old bridge (other actor of the new one's class with the same +0x174 index) is
-  deleted, or, if none is found, the new actor is deleted and the look shows after a reload. Guesses to
-  check in the log (`bridges: ...` lines): +8 really is the id, record X/Z are the bridge middle in
-  5-unit cells, the spawner handles bridges, X isn't used by the editor elsewhere. X is read from the
-  controller hooks (`app::TakeButtons`, game thread in `BridgeTick` on the frame tick). Preview: the panel
-  renders on a PC by compiling `slumber_app.cpp` with stubbed `sl::` callbacks.
+- **Bridges and inclines** (v0.63, tested in game): two extra tabs in HHP's own house exterior menu
+  (descriptor `0x4a33ed0` grown to 7 entries, kinds 0x7f / 0x7e, labels from `STR_CategoryName` 1290 / 1291,
+  strip panes and `CategoryNum` frames 5/6 added by `tools/bridges_tab.py`). X on a bridge (reach 28) or an
+  incline (reach 18) in the editor opens the menu on its tab; the grid shows 8 looks with pictures packed as
+  `Layout_HouseShapeIcon_B0..B7` / `S0..S7` (made from 300x300 PNGs given in `BRIDGE_PICTURES`, kept outside
+  the repo). Bridges: building records of type 26, record +8 = NHSE `BridgeType` (material x size,
+  `k_BridgeIds`); inclines: type 27, +8 = NHSE `SlopeType` (`k_InclineIds`). A pick writes the save record
+  and the land list entry, feeds the building spawner, deletes the old actor a few frames later, and
+  re-ticks the grid (`0x340de50`).
+  - Closing the editor restores its opening snapshot of the island: `KeepOverrides` writes the new id back
+    each frame when a record shows up at its old id, so the swap is what gets saved.
+  - Walk shape: each building has a slot at FieldMgr+0x26e8 (+0x10 on play modes 1/0x32, else +0x6dc8;
+    +8 + index * 0x208). At island load the type switch at `0x2981abc` fills it with a per-type builder:
+    `0x2a3a450` houses, `0x2a3aef0` bridges (collision object slot+0xb8, model name slot+0x100), `0x2a3b680`
+    inclines (slot+0x160, name +0x1a8). Builders do nothing on a filled slot. `RebuildShapes` runs once the
+    editor has closed (the editor's play mode builds nothing): `0x2a3cfa0` (remove: unmark tiles, unregister
+    the collision, empty the slot) and then the type's builder. Using the house builder for a bridge gives
+    a box you can't walk onto.
+  - Hook pool: the extra trampolines needed `JitSize` 0x8000 (`setting.hpp`); running out hangs at boot.
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 
