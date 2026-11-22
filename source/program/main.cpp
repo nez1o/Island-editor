@@ -1628,6 +1628,8 @@ namespace sl {
     static u8* HomeBar() { return s_HomeStrip ? *reinterpret_cast<u8**>(s_HomeStrip + 0x20) : nullptr; }
 
     void HomeTabBarCount(u8* bar, u32 count, bool force = false) {
+        static int s_Dbg = 0;
+        if (s_Dbg < 12 && EditorMap()) { s_Dbg++; Log("bridges: bar call %p count %d (strip %p bar %p)", bar, (int)count, s_HomeStrip, HomeBar()); }
         if (!bar || bar != HomeBar() || count < 1 || count > (u32)HomeTabCount) return;
         if (!force && bar == s_BarDone && count == s_BarDoneCount) return;
         s_BarDone = bar; s_BarDoneCount = count;
@@ -1875,13 +1877,9 @@ namespace sl {
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
         if (u8* ob = ActorOfHandle(oldH)) {
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
-            /* the walkable shape (collision / height) is built from the record per building slot:
-               drop the old one and build it again from the new id, as HHP does on a house move */
-            if (u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal))) {
-                reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, w.idx, PlayModeHash());
-                reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, w.idx, PlayModeHash(), 0, 0, 0, 0, 0);
-                Log("bridges: collision of record %d rebuilt", (int)w.idx);
-            }
+            /* (Rebuilding the building slot here left no collision at all, so the walkable shape
+               keeps the old look's until the island reloads - entering a building and coming back
+               out rebuilds it from the save, which has the new look.) */
         }
         else {
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(nb);
