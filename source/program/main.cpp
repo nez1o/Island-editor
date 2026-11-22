@@ -1926,6 +1926,8 @@ namespace sl {
         w.frames = -1;
     }
 
+    static void RememberOverride(int idx, u16 oldId, u16 newId);
+
     /* Swap bridge record <rec> to <material>, keeping its size. */
     bool ApplyBridgePick(int rec, int material) {
         s16* r = BridgeRecord(rec);
@@ -1938,6 +1940,7 @@ namespace sl {
         *id = newId;
         Log("bridges: record %d id %x -> %x", rec, oldId, newId);
         SetLandBuildingId((u32)rec, oldId, newId);
+        RememberOverride(rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
     }
@@ -1966,8 +1969,47 @@ namespace sl {
         *id = newId;
         Log("bridges: incline record %d id %x -> %x", rec, oldId, newId);
         SetLandBuildingId((u32)rec, oldId, newId);
+        RememberOverride(rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
+    }
+
+    /* Swaps made this session. Closing the island editor puts back the snapshot of the island it
+       took when it opened, which undid them (the log showed the record back at the old id); each
+       frame a record found back at its old id gets the new one again, so it is what gets saved.
+       An override is dropped once the record holds anything else (e.g. rebuilt through Nook). */
+    struct LookOverride { s32 idx; u16 oldId, newId; };
+    constexpr int MaxOverrides = 32;
+    static LookOverride s_Overrides[MaxOverrides];
+    static int s_OverrideCount = 0;
+
+    static void RememberOverride(int idx, u16 oldId, u16 newId) {
+        for (int i = 0; i < s_OverrideCount; i++)
+            if (s_Overrides[i].idx == idx) {
+                if (s_Overrides[i].oldId == newId) { s_Overrides[i] = s_Overrides[--s_OverrideCount]; return; }  /* swapped back */
+                s_Overrides[i].newId = newId; return;
+            }
+        if (s_OverrideCount < MaxOverrides) s_Overrides[s_OverrideCount++] = { idx, oldId, newId };
+    }
+
+    static void KeepOverrides() {
+        u8* recs = BuildingRecords();
+        if (!recs || !s_OverrideCount) return;
+        for (int i = 0; i < s_OverrideCount; i++) {
+            LookOverride& o = s_Overrides[i];
+            u16* id = reinterpret_cast<u16*>(recs + o.idx * 0x14 + BridgeIdOffset);
+            s16 type = *reinterpret_cast<s16*>(recs + o.idx * 0x14);
+            if ((type != BridgeBuildingType && type != InclineBuildingType) || (*id != o.oldId && *id != o.newId)) {
+                Log("bridges: record %d changed elsewhere (%x) - override dropped", (int)o.idx, *id);
+                s_Overrides[i--] = s_Overrides[--s_OverrideCount];
+                continue;
+            }
+            if (*id == o.oldId) {
+                *id = o.newId;
+                if (u8* e = LandBuildingEntry((u32)o.idx)) *reinterpret_cast<u16*>(e + BridgeIdOffset) = o.newId;
+                Log("bridges: record %d was put back to %x - set to %x again", (int)o.idx, o.oldId, o.newId);
+            }
+        }
     }
 
     /* Grid index of the current look of the bridge / incline the menu was opened on, or -1. */
@@ -1984,6 +2026,7 @@ namespace sl {
 
     /* Game thread, every frame. */
     void BridgeTick() {
+        KeepOverrides();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
     }
