@@ -163,7 +163,7 @@ def add_tab_textures(bntx):
     from bntx import textures
     bh = [t for t in textures(bntx) if t['name'] == 'IconCatRoof^s'][0]['bh']
     for _tab, _label, _name, texture, draw in NEW_TABS:
-        linear = bc4.encode(draw(128))
+        linear = bc4.encode(bridge_icons.fit_mask(draw(128)))   # same size / place as the game's icons
         region = bytearray(len(tmpl['data']))
         swz.swizzle_into(region, linear, 32, 32, 8, bh)
         arc['textures'].append(dict(name=texture, brti=tmpl['brti'], data=bytes(region), align=tmpl['align']))

@@ -1658,6 +1658,8 @@ namespace sl {
 
     /* 0x340de50 (fill the grid for the current tab; tabs 0-4 set the item count at +0x1c1f0,
        other tabs keep it): the Bridges tab has one cell per bridge material. */
+    int MenuStructureLook(int tab);
+
     void HomeGridFill(u8* menu) {
         if (menu && EditorMap() && menu + 0x1c260 == s_HomeStrip)   /* also lays the tab bar out */
             HomeTabBarCount(HomeBar(), *reinterpret_cast<u32*>(s_HomeStrip + 0x28));
@@ -1665,6 +1667,12 @@ namespace sl {
         s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
         if (tab == BridgeTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
         if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
+        if (tab >= BridgeTab) {   /* current look (the pink card with the tick) and cursor start */
+            int cur = MenuStructureLook(tab);
+            if (cur < 0) cur = 0;
+            *reinterpret_cast<s32*>(menu + 0x1c254) = cur;
+            *reinterpret_cast<s32*>(menu + 0x1c258) = cur;
+        }
     }
 
     /* 0x340d5b0(menu, event): the grid's picture delegate. Event { op, cell, from cell, -,
@@ -1960,6 +1968,18 @@ namespace sl {
         SetLandBuildingId((u32)rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
+    }
+
+    /* Grid index of the current look of the bridge / incline the menu was opened on, or -1. */
+    int MenuStructureLook(int tab) {
+        u8* recs = BuildingRecords();
+        if (!recs || s_MenuBridge < 0 || s_MenuBridge >= 47) return -1;
+        s16* r = reinterpret_cast<s16*>(recs + s_MenuBridge * 0x14);
+        u16 id = *reinterpret_cast<u16*>(reinterpret_cast<u8*>(r) + BridgeIdOffset);
+        if (tab == BridgeTab && r[0] == BridgeBuildingType) { int m, k; return BridgeLook(id, &m, &k) ? m : -1; }
+        if (tab == InclineTab && r[0] == InclineBuildingType)
+            for (int i = 0; i < (int)(sizeof(k_InclineIds) / 2); i++) if (k_InclineIds[i] == id) return i;
+        return -1;
     }
 
     /* Game thread, every frame. */

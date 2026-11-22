@@ -202,14 +202,14 @@ def tab_icon(size=128, ss=4):
     def inside(x, y):
         if 0.06 * N <= x <= 0.94 * N:
             top = deck_y(x)
-            if top <= y <= top + 0.15 * N: return True                       # deck
+            if top <= y <= top + 0.115 * N: return True                       # deck
             rail = top - 0.30 * N
-            if 0.12 * N <= x <= 0.88 * N and rail <= y <= rail + 0.10 * N: return True   # top rail
+            if 0.12 * N <= x <= 0.88 * N and rail <= y <= rail + 0.075 * N: return True   # top rail
             for k in range(5):                                                # posts
                 px = 0.125 * N + k * 0.175 * N
-                if px <= x <= px + 0.085 * N and rail <= y <= top: return True
+                if px <= x <= px + 0.065 * N and rail <= y <= top: return True
         for lx in (0.20, 0.71):                                               # legs into the water
-            if lx * N <= x <= (lx + 0.09) * N and deck_y(x) <= y <= 0.94 * N: return True
+            if lx * N <= x <= (lx + 0.07) * N and deck_y(x) <= y <= 0.94 * N: return True
         return False
     img = []
     for y in range(size):
@@ -242,6 +242,29 @@ def incline_tab_icon(size=128, ss=4):
             row.append(round(255 * c / (ss * ss)))
         img.append(row)
     return img
+
+
+def fit_mask(img, box=(10, 12, 117, 111)):
+    """Scale / move a 0-255 mask so its shape fills <box> (x0, y0, x1, y1, inclusive) keeping its
+    aspect, centred like the game's IconCat* tab icons (which span about x 10-117, y 12-111)."""
+    n = len(img)
+    ys = [y for y in range(n) if max(img[y]) > 64]
+    xs = [x for x in range(n) if max(img[y][x] for y in range(n)) > 64]
+    sx0, sx1, sy0, sy1 = min(xs), max(xs) + 1, min(ys), max(ys) + 1
+    bx0, by0, bx1, by1 = box[0], box[1], box[2] + 1, box[3] + 1
+    k = min((bx1 - bx0) / (sx1 - sx0), (by1 - by0) / (sy1 - sy0))
+    w, h = (sx1 - sx0) * k, (sy1 - sy0) * k
+    ox, oy = (bx0 + bx1 - w) / 2, (by0 + by1 - h) / 2
+    out = [[0] * n for _ in range(n)]
+    for y in range(n):
+        for x in range(n):
+            acc = 0
+            for j in (0.25, 0.75):
+                for i in (0.25, 0.75):
+                    u = sx0 + (x + i - ox) / k; v = sy0 + (y + j - oy) / k
+                    if sx0 <= u < sx1 and sy0 <= v < sy1: acc += img[int(v)][int(u)]
+            out[y][x] = round(acc / 4)
+    return out
 
 
 def write_inc(path):
