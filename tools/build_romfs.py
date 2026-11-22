@@ -300,7 +300,18 @@ def build_rstb(sizes):
     ncrc = struct.unpack_from('<I', d, 4)[0]
     index = {struct.unpack_from('<I', d, 12 + i * 12)[0]: 12 + i * 12 for i in range(ncrc)}
     for path, size in sizes.items():
-        off = index[zlib.crc32(path.encode())]
+        crc = zlib.crc32(path.encode())
+        if crc not in index:   # a new file (the bridge / incline pictures): insert, keeping the crcs sorted
+            new = (size + 0x2500 + 0x1f) & ~0x1f
+            pos = 12
+            while pos < 12 + ncrc * 12 and struct.unpack_from('<I', d, pos)[0] < crc: pos += 12
+            d[pos:pos] = struct.pack('<III', crc, new, 0)
+            ncrc += 1
+            struct.pack_into('<I', d, 4, ncrc)
+            index = {struct.unpack_from('<I', d, 12 + i * 12)[0]: 12 + i * 12 for i in range(ncrc)}
+            print('RSTB %s: new %d (file %d)' % (path, new, size))
+            continue
+        off = index[crc]
         old = struct.unpack_from('<I', d, off + 4)[0]
         new = max(old, (size + 0x400 + 0x1f) & ~0x1f)
         struct.pack_into('<I', d, off + 4, new)

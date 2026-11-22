@@ -15,7 +15,7 @@ import zstandard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import bflan, bntx_write, bc4, swz, bridge_icons
+import bflan, bntx_write, bc4, swz, bridge_icons, astc, render_icons
 
 TAB_STEP = 98.0                 # layout units between tab buttons (L_Category_0n x = 97 + 98 n)
 # The extra tabs, after the game's five: (tab index, STR_CategoryName label (unused; the game's are
@@ -134,6 +134,61 @@ def add_tab_textures(bntx):
     return bntx_write.write(arc)
 
 
+# ---------------------------------------------------------------- cell pictures
+# The menu's cells show prerendered icon archives, Model/Layout_<kind>Icon_<name>; the house shapes
+# use "Layout_HouseShapeIcon_%s" (300x300 ASTC 4x4 sRGB, name "00".."07"). Each bridge / incline look
+# gets one rendered from the game's own model (render_icons.py), packed into a copy of
+# Layout_HouseShapeIcon_00 with the two-letter name below (same length, so only the name bytes and
+# the pixels change). main.cpp asks for them with the house-shape icon kind.
+BRIDGE_ICONS = [   # grid order (main.cpp k_BridgeIds): archive, model
+    ('BridgeLog', 'BridgeLog04'), ('BridgeSuspension', 'BridgeSuspension04'), ('BridgeStone', 'BridgeStone04'),
+    ('BridgeWood', 'BridgeWood04'), ('BridgeBricks', 'BridgeBricks04'), ('BridgeIron', 'BridgeIron04'),
+    ('BridgeJapanese', 'BridgeJapanese04'), ('BridgeRed', 'BridgeRed04')]
+INCLINE_ICONS = [  # grid order (main.cpp k_InclineIds)
+    ('SlopeNatural', 'SlopeNatural'), ('SlopeWood', 'SlopeWood'), ('SlopeWoodStair', 'SlopeWoodStair'),
+    ('SlopeStoneStair', 'SlopeStoneStair'), ('SlopeBrickStair', 'SlopeBrickStair'), ('SlopeIronStair', 'SlopeIronStair'),
+    ('SlopeWoodBlue', 'SlopeWoodBlue'), ('SlopeIronStairBlue', 'SlopeIronStairBlue')]
+ICON_TEMPLATE = 'Layout_HouseShapeIcon_00'
+
+
+def icon_names():
+    return [('B%d' % i, a, m) for i, (a, m) in enumerate(BRIDGE_ICONS)] + [('S%d' % i, a, m) for i, (a, m) in enumerate(INCLINE_ICONS)]
+
+
+def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
+    """Writes Model/Layout_HouseShapeIcon_<B0..B7, S0..S7>; returns {rstb path: size} (new entries)."""
+    tpl = zs_read(os.path.join(romfs, 'Model', ICON_TEMPLATE + '.Nin_NX_NVN.zs'))
+    (bf_name, bf), = list(sarc_files(tpl))
+    emb = struct.unpack_from('<Q', bf, 0xb8)[0]
+    eo, es = struct.unpack_from('<Q', bf, emb)[0], struct.unpack_from('<I', bf, emb + 8)[0]
+    from bntx import textures
+    t, = textures(bf[eo:eo + es])
+    assert t['name'] == '00' and (t['w'], t['h']) == (300, 300) and t['fmt'] == 0x2d06, t
+    name_at = bf.index(b'\x02\x0000\x00')
+    cache = {}
+    sizes = {}
+    for name, arch, model in icon_names():
+        if arch not in cache:
+            res = render_icons.load_archive(romfs, arch)
+            texs = {n: render_icons.decode_texture(tx, bn) for n, (tx, bn) in res['textures'].items() if n.endswith('_Alb')}
+            cache = {arch: (res, texs)}
+        res, texs = cache[arch]
+        img = render_icons.render(res['models'][model], texs, size=300)
+        if preview_dir: render_icons.write_png(os.path.join(preview_dir, name + '.png'), img)
+        linear = astc.encode(img, 4, 4)
+        region = bytearray(t['size'])
+        swz.swizzle_into(region, linear, 75, 75, 16, t['bh'])
+        nb = bytearray(bf)
+        nb[name_at + 2:name_at + 4] = name.encode()
+        nb[eo + t['data']:eo + t['data'] + t['size']] = region
+        whole = sarc_rebuild(tpl, {bf_name: bytes(nb)})
+        path = 'Model/Layout_HouseShapeIcon_%s.Nin_NX_NVN' % name
+        zs_write(os.path.join(out, path + '.zs'), whole)
+        sizes[path] = len(whole)
+        print('icon', name, arch, model)
+    return sizes
+
+
 # ---------------------------------------------------------------- build
 def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read, msbt_write, langs=('USen', 'EUen')):
     """Writes the files into <out>; returns {rstb path: decompressed size}."""
@@ -178,4 +233,5 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
         blob = sarc_write(mult, [tuple(f) for f in files])
         zs_write(os.path.join(out, 'Message', 'String_%s.sarc.zs' % lang), blob)
         sizes['Message/String_%s.sarc' % lang] = len(blob)
+    sizes.update(build_icons(romfs, out, sarc_files, sarc_rebuild))
     return sizes

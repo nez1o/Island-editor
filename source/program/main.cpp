@@ -1661,10 +1661,44 @@ namespace sl {
         if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
     }
 
-    /* 0x340cf90 (a list page scrolled into view: requests the 3D captures of the visible items).
-       Skipped on the Bridges tab, which has no house parts to capture. */
-    bool HomeGridCaptureSkip(u8* menu) {
-        return menu && EditorMap() && *reinterpret_cast<s32*>(menu + MenuTabIndex) >= BridgeTab;
+    /* 0x340d5b0(menu, event): the grid's picture delegate. Event { op, cell, from cell, -,
+       page* (+0xc first item) }; op 0 = show item <first + cell> in <cell>. The game loads a
+       prerendered icon archive into one of the menu's 270 picture slots (menu +0x2a0, 0x1a8
+       each) with 0x3312d40(slot, SafeString name, item, kind) and puts the slot on the cell
+       (cells at menu +0x240, 0x20 each, +8 slot, +0x18 changed). On the extra tabs the item is a
+       bridge / incline look: its picture is Layout_HouseShapeIcon_B<n> / S<n> (bridges_tab.py,
+       rendered from the game's models), loaded with the house-shape icon kind (0x1b). */
+    constexpr u32 IconLoad       = 0x3312d40;
+    constexpr u32 CellFrame      = 0x340d350;   /* (float frame, menu, item) */
+    constexpr u32 NoneItemGot    = 0x4ab37e0;
+    constexpr u32 IconKindShape  = 0x1b;
+
+    bool HomeGridPicture(u8* menu, const s32* ev) {
+        if (!menu || !ev || !EditorMap()) return false;
+        s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
+        if (tab < BridgeTab || ev[0] != 0) return false;
+        u32 cell = (u32)ev[1];
+        s32 idx = *reinterpret_cast<const s32*>(*reinterpret_cast<u8* const*>(ev + 4) + 0xc) + (s32)cell;
+        s32 slot = -1;
+        if (idx >= 0 && idx < *reinterpret_cast<s32*>(menu + MenuGridCount)) {
+            for (s32 k = 0; k < 0x10e; k++) {
+                u8* sl = menu + 0x2a0 + k * 0x1a8;
+                if (*reinterpret_cast<s32*>(sl + 0x1a0) != 0 || ((sl[0x18] >> 1) & 1)) continue;
+                char name[4] = { tab == BridgeTab ? 'B' : 'S', (char)('0' + idx % 10), 0, 0 };
+                struct { uintptr_t vt; const char* str; } nm = { *reinterpret_cast<uintptr_t*>(Main(SafeStringVtGot)) + 0x10, name };
+                reinterpret_cast<void (*)(u8*, void*, void*, u32)>(Main(IconLoad))(sl, &nm, *reinterpret_cast<void**>(Main(NoneItemGot)), IconKindShape);
+                slot = k;
+                break;
+            }
+        }
+        reinterpret_cast<void (*)(float, u8*, u32)>(Main(CellFrame))(0.0f, menu, (u32)idx);
+        u32 n = *reinterpret_cast<u32*>(menu + 0x238);
+        u8* entry = *reinterpret_cast<u8**>(menu + 0x240) + (cell < n ? cell : 0) * 0x20;
+        if (*reinterpret_cast<s32*>(entry + 8) != slot) {
+            *reinterpret_cast<s32*>(entry + 8) = slot;
+            if (slot != -1) *reinterpret_cast<s32*>(entry + 0x18) = 1;
+        }
+        return true;
     }
 
     bool BridgeTabOpen() {
@@ -2801,11 +2835,11 @@ HOOK_DEFINE_TRAMPOLINE(HomeGridFill) {
     }
 };
 
-/* House menu: a page of the list came into view (captures of the visible items). */
-HOOK_DEFINE_TRAMPOLINE(HomeGridPage) {
-    static void Callback(u8* menu, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
-        if (sl::HomeGridCaptureSkip(menu)) return;
-        Orig(menu, a1, a2, a3, a4, a5, a6, a7);
+/* House menu: the grid's picture delegate (op 0 = show an item in a cell). */
+HOOK_DEFINE_TRAMPOLINE(HomeGridPicture) {
+    static void Callback(u8* menu, const s32* ev, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+        if (sl::HomeGridPicture(menu, ev)) return;
+        Orig(menu, ev, a2, a3, a4, a5, a6, a7);
     }
 };
 
@@ -3030,7 +3064,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     TabBarCount::InstallAtOffset(0x2fe5370);
     TabStripStart::InstallAtOffset(0x3036ca0);
     HomeGridPick::InstallAtOffset(0x340c1d0);
-    HomeGridPage::InstallAtOffset(0x340cf90);
+    HomeGridPicture::InstallAtOffset(0x340d5b0);
     FrameTick::InstallAtOffset(0x7a8414);
     /* cliff tool states 0x228a3e8.., river tool states 0x2288578.. (exec handlers) */
     CliffReadyExec::InstallAtOffset(0x229dcd8);
