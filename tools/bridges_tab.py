@@ -149,6 +149,12 @@ INCLINE_ICONS = [  # grid order (main.cpp k_InclineIds)
     ('SlopeStoneStair', 'SlopeStoneStair'), ('SlopeBrickStair', 'SlopeBrickStair'), ('SlopeIronStair', 'SlopeIronStair'),
     ('SlopeWoodBlue', 'SlopeWoodBlue'), ('SlopeIronStairBlue', 'SlopeIronStairBlue')]
 ICON_TEMPLATE = 'Layout_HouseShapeIcon_00'
+# Bridges whose deck the shader layers in game (render_icons can't): planks drawn from this atlas
+# rect (u0, v0, u1, v1), tint, height below the top the deck stays (None: every upward face).
+DECKS = {
+    'BridgeIron': (0.02, 0.58, 0.36, 0.98, (165, 135, 122), 3.0),   # matched to an in-game screenshot
+    'BridgeWood': (0.0, 0.45, 0.48, 0.98, None),
+}
 
 
 def icon_names():
@@ -176,7 +182,7 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
         # the iron bridge blends two albedo layers in its shader
         # (in game its deck is plain wooden planks: drawn from the atlas' wood with a planar mapping)
         img = render_icons.render(res['models'][model], texs, size=300,
-                                  deck=(0.02, 0.58, 0.36, 0.98, (165, 135, 122)) if arch == 'BridgeIron' else None)
+                                  deck=DECKS.get(arch))
         if preview_dir: render_icons.write_png(os.path.join(preview_dir, name + '.png'), img)
         linear = astc.encode(img, 4, 4)
         region = bytearray(t['size'])

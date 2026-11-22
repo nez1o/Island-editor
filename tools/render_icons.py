@@ -216,7 +216,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         nl = math.sqrt(sum(v * v for v in n)) or 1
         shade = abs(sum(n[i] / nl * light[i] for i in range(3)))
         shade = 0.62 + 0.5 * shade
-        is_deck = deck is not None and n[1] / nl > 0.9 and max(pa[1], pb[1], pc[1]) < top_y - 3.0
+        is_deck = deck is not None and n[1] / nl > 0.9 and (len(deck) < 6 or max(pa[1], pb[1], pc[1]) < top_y - deck[5])
         P = [((v[0] - ox) * k + W / 2, W / 2 - (v[1] - oy) * k, v[2]) for v in (va, vb, vc)]
         x0, x1 = max(0, int(min(p[0] for p in P))), min(W - 1, int(max(p[0] for p in P)) + 1)
         y0, y1 = max(0, int(min(p[1] for p in P))), min(W - 1, int(max(p[1] for p in P)) + 1)
@@ -242,8 +242,9 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                     du, dv = (wz / 30.0) % 1.0, (wx / 30.0) % 1.0
                     u = deck[0] + (deck[2] - deck[0]) * du; v = deck[1] + (deck[3] - deck[1]) * dv
                     r, g, b, a = trows[int(v * th) % th][int(u * tw) % tw]
-                    tr, tg, tb = deck[4]
-                    r, g, b = (r + tr) // 2, (g + tg) // 2, (b + tb) // 2
+                    if deck[4]:
+                        tr, tg, tb = deck[4]
+                        r, g, b = (r + tr) // 2, (g + tg) // 2, (b + tb) // 2
                 elif tex:
                     u = w0 * ua[0] + w1 * ub[0] + w2 * uc[0]
                     v = w0 * ua[1] + w1 * ub[1] + w2 * uc[1]
