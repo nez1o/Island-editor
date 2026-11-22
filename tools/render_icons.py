@@ -156,7 +156,7 @@ def srgb_to_lin(c): c /= 255; return c / 12.92 if c <= 0.04045 else ((c + 0.055)
 def lin_to_srgb(c): c = max(0.0, min(1.0, c)); return round(255 * (c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055))
 
 
-def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1):
+def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1, grey_to=None, deck=None):
     """Orthographic 3/4 view of the shapes, fitted to the picture; returns rows of RGBA."""
     W = size * ss
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
@@ -197,6 +197,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     zbuf = [[1e30] * W for _ in range(W)]
     col = [[None] * W for _ in range(W)]
     light = (-0.45, 0.8, 0.4); ln = math.sqrt(sum(v * v for v in light)); light = tuple(v / ln for v in light)
+    top_y = max(t[3][1] for t in tris) if tris else 0
     def strip(p):   # the atlas' saturated cyan / green / pure-blue column: shader data, not a colour
         r, g, b = p[:3]
         return (g > 150 and g - r > 100) or (r < 70 and g > 120 and b > 120) or (r < 25 and b > 150 and b - g > 60) or r + g + b < 24
@@ -215,6 +216,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         nl = math.sqrt(sum(v * v for v in n)) or 1
         shade = abs(sum(n[i] / nl * light[i] for i in range(3)))
         shade = 0.62 + 0.5 * shade
+        is_deck = deck is not None and n[1] / nl > 0.9 and max(pa[1], pb[1], pc[1]) < top_y - 3.0
         P = [((v[0] - ox) * k + W / 2, W / 2 - (v[1] - oy) * k, v[2]) for v in (va, vb, vc)]
         x0, x1 = max(0, int(min(p[0] for p in P))), min(W - 1, int(max(p[0] for p in P)) + 1)
         y0, y1 = max(0, int(min(p[1] for p in P))), min(W - 1, int(max(p[1] for p in P)) + 1)
@@ -234,12 +236,22 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                 z = w0 * az + w1 * bz + w2 * cz
                 if z >= zbuf[y][x]: continue
                 if w0 * pa[1] + w1 * pb[1] + w2 * pc[1] < CLIPY: continue
-                if tex:
+                if tex and is_deck:            # planar planks from the atlas region deck = (u0, v0, u1, v1, tint)
+                    wx = w0 * pa[0] + w1 * pb[0] + w2 * pc[0]
+                    wz = w0 * pa[2] + w1 * pb[2] + w2 * pc[2]
+                    du, dv = (wz / 30.0) % 1.0, (wx / 30.0) % 1.0
+                    u = deck[0] + (deck[2] - deck[0]) * du; v = deck[1] + (deck[3] - deck[1]) * dv
+                    r, g, b, a = trows[int(v * th) % th][int(u * tw) % tw]
+                    tr, tg, tb = deck[4]
+                    r, g, b = (r + tr) // 2, (g + tg) // 2, (b + tb) // 2
+                elif tex:
                     u = w0 * ua[0] + w1 * ub[0] + w2 * uc[0]
                     v = w0 * ua[1] + w1 * ub[1] + w2 * uc[1]
                     u, v = wrap(u), wrap(v)
                     r, g, b, a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
                     if a < 128: continue
+                    if grey_to and max(r, g, b) - min(r, g, b) < 28 and r + g + b > 240:
+                        r, g, b = grey_to          # shader-blended layer the game shows as this colour
                     if blend_ch >= 0 and mix:
                         mw, mh, mrows = mix
                         t = mrows[int(v % 1 * mh) % mh][int(u % 1 * mw) % mw][blend_ch] / 255

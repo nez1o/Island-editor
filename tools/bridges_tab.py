@@ -173,8 +173,10 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
             texs = {n: render_icons.decode_texture(tx, bn) for n, (tx, bn) in res['textures'].items() if n.endswith('_Alb') or n.endswith('_Mix')}
             cache = {arch: (res, texs)}
         res, texs = cache[arch]
-        # the iron bridge blends two albedo layers (UV sets 0 / 1) by its Mix map's red channel
-        img = render_icons.render(res['models'][model], texs, size=300, blend=0 if arch == 'BridgeIron' else -1)
+        # the iron bridge blends two albedo layers in its shader
+        # (in game its deck is plain wooden planks: drawn from the atlas' wood with a planar mapping)
+        img = render_icons.render(res['models'][model], texs, size=300,
+                                  deck=(0.02, 0.58, 0.36, 0.98, (165, 135, 122)) if arch == 'BridgeIron' else None)
         if preview_dir: render_icons.write_png(os.path.join(preview_dir, name + '.png'), img)
         linear = astc.encode(img, 4, 4)
         region = bytearray(t['size'])
