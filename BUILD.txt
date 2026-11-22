@@ -1,0 +1,1 @@
+Module built from fix/bridge-menu-freeze at 7cbba3fb1d4a2e83c72d4caaafada8476b12be08
