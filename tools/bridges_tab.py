@@ -46,7 +46,28 @@ def flyt_sections(body):
 
 def add_tab_panes(body):
     for tab, *_ in NEW_TABS: body = add_tab_pane(body, tab)
-    return body
+    return set_strip_static(body)
+
+
+# The tab strip's panes as laid out for 7 tabs (CategoryNum's last frame). The menu doesn't play
+# that animation on the main island, so the layout's own values (the 5-tab layout) are what shows.
+STRIP_7 = {'N_Cat_00': ('x', 49.0), 'N_L_00': ('x', -49.0), 'N_R_00': ('x', 49.0),
+           'N_L_03': ('x', -489.0), 'N_R_03': ('x', -391.0), 'N_L_04': ('x', -489.0), 'N_R_04': ('x', -391.0),
+           'W_CategoryBase_00': ('w', 726.0)}
+
+
+def set_strip_static(body):
+    body = bytearray(body)
+    seen = set()
+    for t, p, sz in flyt_sections(body):
+        if t not in (b'pan1', b'wnd1', b'pic1', b'prt1'): continue
+        name = bytes(body[p + 0xc:p + 0x24]).split(b'\0')[0].decode()
+        if name not in STRIP_7: continue
+        what, v = STRIP_7[name]
+        struct.pack_into('<f', body, p + (0x2c if what == 'x' else 0x4c), v)
+        seen.add(name)
+    assert seen == set(STRIP_7), set(STRIP_7) - seen
+    return bytes(body)
 
 
 def add_tab_pane(body, tab):

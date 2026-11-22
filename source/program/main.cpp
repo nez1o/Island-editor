@@ -1838,6 +1838,36 @@ namespace sl {
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]);
     }
 
+    /* The island's building list keeps its own storage of the 20-byte records (what the game saves
+       from): 0x1260490 reads entry <i> as accessor = (*list+0x10 vt[0])(list+0x10), entry =
+       accessor->vt[0x20](accessor, i) + accessor[1]. Changes must go there too, or they are lost
+       on saving (the save view at +0x116cc0 is only what the field reads). */
+    static u8* LandBuildingEntry(u32 idx) {
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!list) return nullptr;
+        u8* holder = list + 0x10;
+        using GetFn = u8* (*)(u8*);
+        u8* acc = reinterpret_cast<GetFn>(**reinterpret_cast<uintptr_t**>(holder))(holder);
+        if (!acc) return nullptr;
+        u8* vt = *reinterpret_cast<u8**>(acc);
+        u32 n = reinterpret_cast<u32 (*)(u8*)>(*reinterpret_cast<uintptr_t*>(vt + 0x18))(acc);
+        if (idx >= n) return nullptr;
+        u64 off = reinterpret_cast<u64 (*)(u8*, u32)>(*reinterpret_cast<uintptr_t*>(vt + 0x20))(acc, idx);
+        return *reinterpret_cast<u8**>(acc + 8) + off;
+    }
+
+    static void SetLandBuildingId(u32 idx, u16 oldId, u16 newId) {
+        u8* e = LandBuildingEntry(idx);
+        if (!e) { Log("bridges: land list entry %d not found", (int)idx); return; }
+        LogRecord("land entry", e);
+        u16* id = reinterpret_cast<u16*>(e + BridgeIdOffset);
+        u8* recs = BuildingRecords();
+        if (*id == oldId || *id == newId) { *id = newId; Log("bridges: land entry %d id -> %x%s", (int)idx, newId, recs && e == recs + idx * 0x14 ? " (same as save view)" : ""); }
+        else Log("bridges: land entry %d id %x unexpected, left alone", (int)idx, *id);
+    }
+
     /* Rebuild bridge <idx> from its (changed) record. */
     static void RespawnBridge(int idx, u16 oldId, u16 newId) {
         u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
@@ -1899,6 +1929,7 @@ namespace sl {
         u16 oldId = *id, newId = k_BridgeIds[material][k];
         *id = newId;
         Log("bridges: record %d id %x -> %x", rec, oldId, newId);
+        SetLandBuildingId((u32)rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
     }
@@ -1926,6 +1957,7 @@ namespace sl {
         if (oldId == newId) return true;
         *id = newId;
         Log("bridges: incline record %d id %x -> %x", rec, oldId, newId);
+        SetLandBuildingId((u32)rec, oldId, newId);
         RespawnBridge(rec, oldId, newId);
         return true;
     }
