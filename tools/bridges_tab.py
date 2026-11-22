@@ -154,6 +154,7 @@ ICON_TEMPLATE = 'Layout_HouseShapeIcon_00'
 DECKS = {
     'BridgeIron': (0.02, 0.58, 0.36, 0.98, (165, 135, 122), 3.0),   # matched to an in-game screenshot
     'BridgeWood': (0.0, 0.45, 0.48, 0.98, None),
+    'BridgeSuspension': (0.0, 0.58, 0.48, 0.98, None),
 }
 
 
