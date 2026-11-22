@@ -1618,11 +1618,12 @@ namespace sl {
     /* The bar is created after the tabs are set, so the strip is remembered and its bar
        (strip +0x20) looked up when needed; the tab-changed handler also re-applies the layout. */
     static u8* s_HomeStrip = nullptr;
+    static s32 s_Tab0Current = -1;   /* tab 0's own current item while the extra tabs borrow it */
     static u8* s_BarDone = nullptr;      /* bar / count the layout was last applied to */
     static u32 s_BarDoneCount = 0;
 
     void HomeTabStrip(u8* strip, const void* desc) {
-        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) { s_HomeStrip = strip; s_BarDone = nullptr; }
+        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) { s_HomeStrip = strip; s_BarDone = nullptr; s_Tab0Current = -1; }
     }
 
     static u8* HomeBar() { return s_HomeStrip ? *reinterpret_cast<u8**>(s_HomeStrip + 0x20) : nullptr; }
@@ -1667,11 +1668,20 @@ namespace sl {
         s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
         if (tab == BridgeTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
         if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
-        if (tab >= BridgeTab) {   /* current look (the pink card with the tick) and cursor start */
+        /* current look (the pink card with the tick) and the cursor's start: the grid reads the
+           current item of the tab clamped to 0-4 (tab 0, +0x1c1f4), so on the extra tabs tab 0's
+           slot holds ours, and gets its own value back on the game's tabs */
+        s32* tab0 = reinterpret_cast<s32*>(menu + 0x1c1f4);
+        if (tab >= BridgeTab) {
             int cur = MenuStructureLook(tab);
             if (cur < 0) cur = 0;
+            if (s_Tab0Current < 0) s_Tab0Current = *tab0;
+            *tab0 = cur;
             *reinterpret_cast<s32*>(menu + 0x1c254) = cur;
             *reinterpret_cast<s32*>(menu + 0x1c258) = cur;
+        } else if (s_Tab0Current >= 0) {
+            *tab0 = s_Tab0Current;
+            s_Tab0Current = -1;
         }
     }
 
@@ -2008,6 +2018,12 @@ namespace sl {
                 *id = o.newId;
                 if (u8* e = LandBuildingEntry((u32)o.idx)) *reinterpret_cast<u16*>(e + BridgeIdOffset) = o.newId;
                 Log("bridges: record %d was put back to %x - set to %x again", (int)o.idx, o.oldId, o.newId);
+                /* the restore rebuilt the walkable shape from the old look: build it again */
+                if (u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal))) {
+                    reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)o.idx, PlayModeHash());
+                    reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, (u32)o.idx, PlayModeHash(), 0, 0, 0, 0, 0);
+                    Log("bridges: walkable shape of record %d rebuilt", (int)o.idx);
+                }
             }
         }
     }
