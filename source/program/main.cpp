@@ -1833,7 +1833,16 @@ namespace sl {
                     oldH = *reinterpret_cast<u32*>(a + 0x230);
             });
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
-        if (u8* ob = ActorOfHandle(oldH)) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
+        if (u8* ob = ActorOfHandle(oldH)) {
+            reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
+            /* the walkable shape (collision / height) is built from the record per building slot:
+               drop the old one and build it again from the new id, as HHP does on a house move */
+            if (u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal))) {
+                reinterpret_cast<void (*)(u8*, u32, u32)>(Main(BldSlotRemove))(field + BldSlotOffset, w.idx, PlayModeHash());
+                reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(field + BldSlotOffset, w.idx, PlayModeHash(), 0, 0, 0, 0, 0);
+                Log("bridges: collision of record %d rebuilt", (int)w.idx);
+            }
+        }
         else {
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(nb);
             Log("bridges: old bridge not found - new look shows after a reload");
