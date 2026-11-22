@@ -8,7 +8,6 @@
 import math, os, struct, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FLIPV = os.environ.get('FLIPV', '0') == '1'
 CLIPY = float(os.environ.get('CLIPY', '-1e9'))
 sys.path.insert(0, HERE)
 import swz
@@ -70,10 +69,11 @@ def read_bfres(d):
             ioff = struct.unpack_from('<I', d, mesh + 0x20)[0]
             vt = vtxs[vtx_i]
             pos = read_attr(d, vt['attrs']['_p0'], vt['count'])
-            uvk = os.environ.get('UVSET', '_u0'); uv = read_attr(d, vt['attrs'][uvk], vt['count']) if uvk in vt['attrs'] else None
+            uv = read_attr(d, vt['attrs']['_u0'], vt['count']) if '_u0' in vt['attrs'] else None
+            uv1 = read_attr(d, vt['attrs']['_u1'], vt['count']) if '_u1' in vt['attrs'] else None
             isz = 2 if ifmt == 1 else 4
             idx = [struct.unpack_from('<H' if isz == 2 else '<I', d, buf_base + ioff + i * isz)[0] + ifirst for i in range(icount)]
-            shapes.append(dict(name=_str(d, _q(d, s + 8)), pos=pos, uv=uv, idx=idx, material=mats[mat_i]))
+            shapes.append(dict(name=_str(d, _q(d, s + 8)), pos=pos, uv=uv, uv1=uv1, idx=idx, material=mats[mat_i]))
         models[name] = shapes
     texs = {}
     if emb:
@@ -172,8 +172,10 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         vp = [view(p) for p in s['pos']]
         for i in range(0, len(s['idx']) - 2, 3):
             a, b, c = s['idx'][i:i + 3]
+            u1 = s['uv1'] or s['uv'] or [(0, 0)] * len(s['pos'])
             tris.append((vp[a], vp[b], vp[c], s['pos'][a], s['pos'][b], s['pos'][c],
-                         s['uv'][a] if s['uv'] else (0, 0), s['uv'][b] if s['uv'] else (0, 0), s['uv'][c] if s['uv'] else (0, 0), tex))
+                         s['uv'][a] if s['uv'] else (0, 0), s['uv'][b] if s['uv'] else (0, 0), s['uv'][c] if s['uv'] else (0, 0), tex,
+                         u1[a], u1[b], u1[c]))
     if not tris: return None
     xs = [v[0] for t in tris for v in t[:3]]; ys = [v[1] for t in tris for v in t[:3]]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
@@ -183,19 +185,21 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     for t in tris:
         tex = t[9]
         if tex is None or id(tex) in base: continue
-        px = [p for row in tex[2][::4] for p in row[::4] if not (p[2] > p[0] + 50 and p[2] > 110) and sum(p[:3]) >= 24]
+        px = [p for row in tex[2][::4] for p in row[::4] if not (max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150) and sum(p[:3]) >= 24]
         px.sort(key=lambda p: p[0] + p[1] + p[2])
         base[id(tex)] = px[len(px) // 2][:3] if px else (170, 160, 150)
     zbuf = [[1e30] * W for _ in range(W)]
     col = [[None] * W for _ in range(W)]
     light = (-0.45, 0.8, 0.4); ln = math.sqrt(sum(v * v for v in light)); light = tuple(v / ln for v in light)
-    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex in tris:
+    def strip(p):   # the atlas' saturated cyan / green / blue column: shader data, not a colour
+        return max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150 or p[0] + p[1] + p[2] < 24
+    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1 in tris:
         # face normal (model space) for lighting
         e1 = [pb[i] - pa[i] for i in range(3)]; e2 = [pc[i] - pa[i] for i in range(3)]
         n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
         nl = math.sqrt(sum(v * v for v in n)) or 1
         shade = abs(sum(n[i] / nl * light[i] for i in range(3)))
-        shade = 0.45 + 0.6 * shade
+        shade = 0.62 + 0.5 * shade
         P = [((v[0] - ox) * k + W / 2, W / 2 - (v[1] - oy) * k, v[2]) for v in (va, vb, vc)]
         x0, x1 = max(0, int(min(p[0] for p in P))), min(W - 1, int(max(p[0] for p in P)) + 1)
         y0, y1 = max(0, int(min(p[1] for p in P))), min(W - 1, int(max(p[1] for p in P)) + 1)
@@ -218,10 +222,13 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                 if tex:
                     u = w0 * ua[0] + w1 * ub[0] + w2 * uc[0]
                     v = w0 * ua[1] + w1 * ub[1] + w2 * uc[1]
-                    r, g, b, a = trows[int((1 - v) % 1 * th) % th if FLIPV else int(v % 1 * th) % th][int(u % 1 * tw) % tw]
+                    r, g, b, a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
                     if a < 128: continue
-                    if (b > r + 50 and b > 110) or r + g + b < 24:   # the atlas' water-line gradient strip and
-                        r, g, b = base[id(tex)]     # unused black areas: the material's plain colour instead
+                    if strip((r, g, b)):            # try the second UV set (the base colour of these faces)
+                        u = w0 * ua1[0] + w1 * ub1[0] + w2 * uc1[0]
+                        v = w0 * ua1[1] + w1 * ub1[1] + w2 * uc1[1]
+                        r, g, b, _a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
+                        if strip((r, g, b)): r, g, b = base[id(tex)]
                 else:
                     r, g, b = 180, 170, 160
                 zbuf[y][x] = z

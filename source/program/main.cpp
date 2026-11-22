@@ -1618,15 +1618,19 @@ namespace sl {
     /* The bar is created after the tabs are set, so the strip is remembered and its bar
        (strip +0x20) looked up when needed; the tab-changed handler also re-applies the layout. */
     static u8* s_HomeStrip = nullptr;
+    static u8* s_BarDone = nullptr;      /* bar / count the layout was last applied to */
+    static u32 s_BarDoneCount = 0;
 
     void HomeTabStrip(u8* strip, const void* desc) {
-        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) s_HomeStrip = strip;
+        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) { s_HomeStrip = strip; s_BarDone = nullptr; }
     }
 
     static u8* HomeBar() { return s_HomeStrip ? *reinterpret_cast<u8**>(s_HomeStrip + 0x20) : nullptr; }
 
-    void HomeTabBarCount(u8* bar, u32 count) {
+    void HomeTabBarCount(u8* bar, u32 count, bool force = false) {
         if (!bar || bar != HomeBar() || count < 1 || count > (u32)HomeTabCount) return;
+        if (!force && bar == s_BarDone && count == s_BarDoneCount) return;
+        s_BarDone = bar; s_BarDoneCount = count;
         u8* anim = *reinterpret_cast<u8**>(bar + 0x208);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) { Log("bridges: bar has no CategoryNum anim"); return; }
         struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 0x14, 0 };
@@ -1675,6 +1679,8 @@ namespace sl {
 
     bool HomeGridPicture(u8* menu, const s32* ev) {
         if (!menu || !ev || !EditorMap()) return false;
+        /* the grid fills once the tab bar exists: lay the bar out for our tab count here too */
+        if (menu + 0x1c260 == s_HomeStrip) HomeTabBarCount(HomeBar(), *reinterpret_cast<u32*>(s_HomeStrip + 0x28));
         s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
         if (tab < BridgeTab || ev[0] != 0) return false;
         u32 cell = (u32)ev[1];
@@ -2800,7 +2806,7 @@ HOOK_DEFINE_TRAMPOLINE(TabButtonIcon) {
 HOOK_DEFINE_TRAMPOLINE(TabBarCount) {
     static void Callback(u8* bar, u64 count, u64 sel, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         Orig(bar, count, sel, a3, a4, a5, a6, a7);
-        sl::HomeTabBarCount(bar, (u32)count);
+        sl::HomeTabBarCount(bar, (u32)count, true);
     }
 };
 
