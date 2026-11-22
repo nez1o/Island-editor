@@ -1821,8 +1821,13 @@ namespace sl {
        the menu then starts on the Bridges tab (HomeTabStart). */
     bool BridgeDesignGet(u32 handle) {
         u8* a = ActorOfHandle(handle);
-        for (int i = 0; i < MaxHandleRemaps && !a && handle; i++)
-            if (s_RemapFrom[i] == handle) a = ActorOfHandle(s_RemapTo[i]);
+        for (int n = 0; n < MaxHandleRemaps && !a && handle; n++) {   /* swapped bridge (maybe more than once) */
+            u32 to = 0;
+            for (int i = 0; i < MaxHandleRemaps; i++) if (s_RemapFrom[i] == handle) to = s_RemapTo[i];
+            if (!to) break;
+            handle = to;
+            a = ActorOfHandle(handle);
+        }
         if (!a || VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) { s_MenuBridge = -1; return false; }
         s_MenuBridge = (int)*reinterpret_cast<u32*>(a + ActorRecordIndex);
         s_MenuKind = StructureOfBody(a);
@@ -1842,19 +1847,25 @@ namespace sl {
     }
 
     /* 0x340c1d0(menu, event): A on a grid cell. On the Bridges tab: which cell (the game's own
-       index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on. */
-    bool HomeGridPick(u8* menu, u8* event) {
+       index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on.
+       The game's own handler still runs afterwards (v0.64): skipping it left the grid without
+       its hand cursor and the menu stuck until it was closed and opened again. The house pick
+       it makes is ignored (HouseDesignSet), and the grid is refilled on the next frame
+       (s_RefillMenu) so the tick moves to the new look outside the press handler. */
+    static u8* s_RefillMenu = nullptr;
+
+    void HomeGridPick(u8* menu, u8* event) {
         s32 tab = menu ? *reinterpret_cast<s32*>(menu + MenuTabIndex) : -1;
-        if (!menu || !event || !EditorMap() || tab < BridgeTab) return false;
+        if (!menu || !event || !EditorMap() || tab < BridgeTab) return;
         u8* owner = *reinterpret_cast<u8**>(menu + 0x220);
         u8* list = owner ? *reinterpret_cast<u8**>(owner + 0x578) : nullptr;
-        if (!list) return true;
+        if (!list) return;
         void* cell = *reinterpret_cast<void**>(event + 8);
         s32 n = *reinterpret_cast<s32*>(list + 0x208);
         void** cells = *reinterpret_cast<void***>(list + 0x210);
         s32 slot = -1;
         for (s32 i = 0; i < n && cells; i++) if (cells[i] == cell) { slot = i; break; }
-        if (slot < 0) return true;
+        if (slot < 0) return;
         s32 cols = *reinterpret_cast<s32*>(list + 0x2e8);
         s32 top = *reinterpret_cast<s32*>(list + 0x430) - *reinterpret_cast<s32*>(list + 0x438);
         s32 row = cols ? slot / cols : 0;
@@ -1876,9 +1887,8 @@ namespace sl {
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
             else ApplyInclinePick(s_MenuBridge, idx);
-            reinterpret_cast<void (*)(u8*)>(Main(0x340de50))(menu);   /* refill: the tick moves to the new look */
+            s_RefillMenu = menu;   /* next frame: the tick moves to the new look */
         } else if (idx >= 0) Log("bridges: point at a %s and press X to change it", want == BridgeBuildingType ? "bridge" : "incline");
-        return true;
     }
 
     static void LogRecord(const char* what, const u8* r) {
@@ -1954,6 +1964,9 @@ namespace sl {
             });
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
         if (u8* ob = ActorOfHandle(oldH)) {
+            /* the open menu keeps the old bridge's handle: lead it to the new one */
+            s_RemapFrom[s_RemapNext] = oldH; s_RemapTo[s_RemapNext] = w.newH;
+            s_RemapNext = (s_RemapNext + 1) % MaxHandleRemaps;
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
             /* (its walkable shape is rebuilt once the island editor closes: RebuildShapes) */
         }
@@ -2119,6 +2132,11 @@ namespace sl {
         RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
+        if (u8* m = s_RefillMenu) {
+            s_RefillMenu = nullptr;
+            if (m == s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(m + MenuTabIndex) >= BridgeTab)
+                reinterpret_cast<void (*)(u8*)>(Main(0x340de50))(m);
+        }
     }
 
     /* 0x13ba988 (edit object of a handle) for our buildings: handle +8 type, +0x10 actor handle. */
@@ -2494,7 +2512,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.63 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-test - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -3003,7 +3021,7 @@ HOOK_DEFINE_TRAMPOLINE(TabStripStart) {
 /* House menu: A on a grid cell. */
 HOOK_DEFINE_TRAMPOLINE(HomeGridPick) {
     static void Callback(u8* menu, u8* event, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
-        if (sl::HomeGridPick(menu, event)) return;
+        sl::HomeGridPick(menu, event);
         Orig(menu, event, a2, a3, a4, a5, a6, a7);
     }
 };
