@@ -26,7 +26,8 @@ jobs:
         with:
           name: module-${{ github.sha }}
           path: deploy/
-      - name: Publish build to the build-output branch
+      - name: Publish build to a build-output branch
+        shell: bash
         run: |
           set -e
           mkdir -p /tmp/out && cp -r deploy/. /tmp/out/
