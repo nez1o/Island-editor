@@ -942,6 +942,8 @@ namespace sl {
     /* 0x13d0308 on the main island: the building whose footprint holds the cursor cell
        (query +8 / +0xc, 5-unit cells). Fills the full rect (out) and the min cell (minOut) like
        the game. Returns the body's actor handle or 0. */
+    static void BridgeProbe(float x, float z);
+
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
         float cz = *reinterpret_cast<const s32*>(query + 0xc) * 5.0f + 2.5f;
@@ -951,7 +953,7 @@ namespace sl {
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
             if (cx >= p->x - 20 && cx < p->x + 20 && cz >= p->z - 25 && cz < p->z + 25) body = a;
         });
-        if (!body) return 0;
+        if (!body) { BridgeProbe(cx, cz); return 0; }
         BldComp* c = AttachComp(body);
         if (!c) return 0;
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
@@ -1722,6 +1724,34 @@ namespace sl {
             Log("bridges: old bridge not found - new look shows after a reload");
         }
         w.frames = -1;
+    }
+
+    /* Discovery (test build): with the editor cursor near a bridge record, log the record and the
+       actors carrying its index, once per bridge, to learn the bridge actor's class and position. */
+    static u64 s_BridgeProbed = 0;
+    static void BridgeProbe(float x, float z) {
+        u8* recs = BuildingRecords();
+        if (!recs) return;
+        for (int i = 0; i < 47; i++) {
+            s16* r = reinterpret_cast<s16*>(recs + i * 0x14);
+            if (r[0] != BridgeBuildingType || (s_BridgeProbed >> i & 1)) continue;
+            float dx = r[1] * 5.0f - x, dz = r[2] * 5.0f - z;
+            if (dx * dx + dz * dz > 25.0f * 25.0f) continue;
+            s_BridgeProbed |= 1ull << i;
+            LogRecord("probe record", reinterpret_cast<u8*>(r));
+            Log("bridges: probe record %d at (%d, %d), cursor (%d, %d)", i, r[1] * 5, r[2] * 5, (int)x, (int)z);
+            int n = 0;
+            ForEachActor([&](u8* a) {
+                if (*reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)i || n >= 12) return;
+                n++;
+                const float* f = reinterpret_cast<const float*>(a + 0x7f0);
+                const float* t = reinterpret_cast<const float*>(*reinterpret_cast<u8**>(a + ActorTransform));
+                Log("bridges: probe actor vt %x handle %x +7f0 (%d, %d, %d) part %x", VtOf(a), *reinterpret_cast<u32*>(a + 0x230),
+                    (int)f[0], (int)f[1], (int)f[2], PartPair(a));
+                (void)t;
+            });
+            if (!n) Log("bridges: probe found no actor with index %d", i);
+        }
     }
 
     /* Swap bridge record <rec> to <material>, keeping its size. */
