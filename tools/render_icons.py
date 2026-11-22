@@ -156,7 +156,7 @@ def srgb_to_lin(c): c /= 255; return c / 12.92 if c <= 0.04045 else ((c + 0.055)
 def lin_to_srgb(c): c = max(0.0, min(1.0, c)); return round(255 * (c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055))
 
 
-def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1, grey_to=None, deck=None, recolor=None):
+def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1, grey_to=None, deck=None, recolor=None, scene=None):
     """Orthographic 3/4 view of the shapes, fitted to the picture; returns rows of RGBA."""
     W = size * ss
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
@@ -186,8 +186,11 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     if not tris: return None
     xs = [v[0] for t in tris for v in t[:3]]; ys = [v[1] for t in tris for v in t[:3]]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
-    k = fill * W / span
+    k = (fill * 0.8 if scene else fill) * W / span
     ox, oy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+    if scene:   # the construction shop's look: grass, and a river (bridges) or a cliff (inclines)
+        P = [p for t in tris for p in t[3:6]]
+        tris += scene_tris(scene, P, view)
     base = {}
     for t in tris:
         tex = t[9]
@@ -216,7 +219,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
         nl = math.sqrt(sum(v * v for v in n)) or 1
         shade = abs(sum(n[i] / nl * light[i] for i in range(3)))
-        shade = 0.62 + 0.5 * shade
+        shade = 0.8 + 0.42 * shade
         is_deck = deck is not None and n[1] / nl > 0.9 and (len(deck) < 6 or max(pa[1], pb[1], pc[1]) < top_y - deck[5])
         P = [((v[0] - ox) * k + W / 2, W / 2 - (v[1] - oy) * k, v[2]) for v in (va, vb, vc)]
         x0, x1 = max(0, int(min(p[0] for p in P))), min(W - 1, int(max(p[0] for p in P)) + 1)
@@ -285,8 +288,56 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                     cov += 1
                     for ch in range(3): acc[ch] += srgb_to_lin(c[ch]) * c[3]
             if not cov: row.append((0, 0, 0, 0)); continue
-            row.append(tuple(lin_to_srgb(a / cov) for a in acc) + (round(255 * cov / (ss * ss)),))
+            alpha = cov / (ss * ss)
+            if scene: alpha *= vignette(X, Y, size)
+            row.append(tuple(lin_to_srgb(a / cov) for a in acc) + (round(255 * alpha),))
         out.append(row)
+    return out
+
+
+def vignette(x, y, size, inset=0.05, radius=0.22, soft=0.06):
+    """Soft rounded-square fade like the construction shop's pictures (1 inside, 0 outside)."""
+    u, v = (x + 0.5) / size, (y + 0.5) / size
+    lo, hi = inset + radius, 1 - inset - radius
+    dx = max(lo - u, 0.0, u - hi); dy = max(lo - v, 0.0, v - hi)
+    d = math.sqrt(dx * dx + dy * dy) - radius        # signed distance to the rounded square edge
+    return max(0.0, min(1.0, -d / soft))
+
+
+GRASS, GRASS_L, DIRT, WATER = (112, 206, 64), (128, 216, 80), (200, 150, 88), (40, 104, 226)
+
+
+def scene_tris(kind, P, view):
+    """Flat-coloured ground around the model, as tris in render()'s format."""
+    xs = [p[0] for p in P]; ys = [p[1] for p in P]; zs = [p[2] for p in P]
+    x0, x1, z0, z1, y1 = min(xs), max(xs), min(zs), max(zs), max(ys)
+    big = 90.0
+    out = []
+    def quad(a, b, c, d, colr):
+        for t in ((a, b, c), (a, c, d)):
+            out.append((view(t[0]), view(t[1]), view(t[2]), t[0], t[1], t[2], (0, 0), (0, 0), (0, 0), None,
+                        (0, 0), (0, 0), (0, 0), colr, None, None))
+    if kind == 'bridge':       # river across the bridge's length (x): water where the deck is off the ground
+        half = (x1 - x0) / 2 - 9.0
+        g, w = 0.0, -1.8
+        if os.environ.get('RIVER_ALONG_X'):
+            hz = (z1 - z0) / 2 + 6.0
+            quad((-big, g, -big), (big, g, -big), (big, g, -hz), (-big, g, -hz), GRASS)
+            quad((-big, g, hz), (big, g, hz), (big, g, big), (-big, g, big), GRASS)
+            quad((-big, w, -hz), (big, w, -hz), (big, w, hz), (-big, w, hz), WATER)
+        else:
+            quad((-big, g, -big), (-half, g, -big), (-half, g, big), (-big, g, big), GRASS)
+            quad((half, g, -big), (big, g, -big), (big, g, big), (half, g, big), GRASS)
+            quad((-half, w, -big), (half, w, -big), (half, w, big), (-half, w, big), WATER)
+            quad((-half, g, -big), (-half, w, -big), (-half, w, big), (-half, g, big), DIRT)     # banks
+            quad((half, w, -big), (half, g, -big), (half, g, big), (half, w, big), DIRT)
+    else:                      # incline rising along +x onto a cliff
+        top = [p for p in P if p[1] > y1 - 1.0]
+        xc = min(p[0] for p in top) if top else x1
+        g = min(ys) + 0.3
+        quad((-big, g, -big), (xc, g, -big), (xc, g, big), (-big, g, big), GRASS)
+        quad((xc, y1, -big), (big, y1, -big), (big, y1, big), (xc, y1, big), GRASS_L)
+        quad((xc, g, -big), (xc, y1, -big), (xc, y1, big), (xc, g, big), DIRT)              # cliff face
     return out
 
 

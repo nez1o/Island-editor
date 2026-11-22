@@ -186,7 +186,9 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
         # the iron bridge blends two albedo layers in its shader
         # (in game its deck is plain wooden planks: drawn from the atlas' wood with a planar mapping)
         img = render_icons.render(res['models'][model], texs, size=300,
-                                  deck=DECKS.get(arch), recolor=RECOLOR.get(arch))
+                                  deck=DECKS.get(arch), recolor=RECOLOR.get(arch),
+                                  scene='bridge' if arch.startswith('Bridge') else 'slope',
+                                  yaw=-125.0 if arch.startswith('Bridge') else -35.0, pitch=32.0)
         if preview_dir: render_icons.write_png(os.path.join(preview_dir, name + '.png'), img)
         linear = astc.encode(img, 4, 4)
         region = bytearray(t['size'])
