@@ -152,7 +152,8 @@ ICON_TEMPLATE = 'Layout_HouseShapeIcon_00'
 # Bridges whose deck the shader layers in game (render_icons can't): planks drawn from this atlas
 # rect (u0, v0, u1, v1), tint, height below the top the deck stays (None: every upward face).
 # Materials the game tints at run time (the natural incline's mossy step stones are grey in game).
-RECOLOR = {'SlopeNatural': {'SlopeNaturalStone': (168, 160, 148)}}
+RECOLOR = {'SlopeNatural': {'SlopeNaturalStone': (168, 160, 148)},
+           'SlopeWood': {'mSlopeWood': (138, 100, 66)}}   # weathered grey-green planks -> wood
 DECKS = {
     'BridgeIron': (0.02, 0.58, 0.36, 0.98, (165, 135, 122), 3.0),   # matched to an in-game screenshot
     'BridgeWood': (0.0, 0.45, 0.48, 0.98, None),
