@@ -1604,18 +1604,18 @@ namespace sl {
        game always had 5 tabs, so it always ran "to the end", frame 4). With the 6-frame animation
        that would be wrong both ways (6 tabs: end; 5 tabs in HHP: frame 5 = 6-tab layout), so the
        house menu's bar (remembered when its tabs are set) gets frame count - 1. */
-    static u8* s_HomeBar = nullptr;
+    /* The bar is created after the tabs are set, so the strip is remembered and its bar
+       (strip +0x20) looked up when needed; the tab-changed handler also re-applies the layout. */
+    static u8* s_HomeStrip = nullptr;
 
     void HomeTabStrip(u8* strip, const void* desc) {
-        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) {
-            s_HomeBar = *reinterpret_cast<u8**>(strip + 0x20);
-            Log("bridges: tab strip %p bar %p", strip, s_HomeBar);
-        }
+        if (desc == reinterpret_cast<const void*>(Main(HomeTabDesc)) && strip) s_HomeStrip = strip;
     }
 
+    static u8* HomeBar() { return s_HomeStrip ? *reinterpret_cast<u8**>(s_HomeStrip + 0x20) : nullptr; }
+
     void HomeTabBarCount(u8* bar, u32 count) {
-        if (s_HomeBar && EditorMap()) Log("bridges: bar %p count %d (menu bar %p)", bar, (int)count, s_HomeBar);
-        if (!bar || bar != s_HomeBar || count < 1 || count > 6) return;
+        if (!bar || bar != HomeBar() || count < 1 || count > 6) return;
         u8* anim = *reinterpret_cast<u8**>(bar + 0x208);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) { Log("bridges: bar has no CategoryNum anim"); return; }
         struct { uintptr_t vt; u32 id; u32 pad; } q = { *reinterpret_cast<uintptr_t*>(Main(AnimFrameQueryGot)) + 0x10, 0x14, 0 };
@@ -1623,13 +1623,16 @@ namespace sl {
         u8* ft = *reinterpret_cast<u8**>(anim + 24);
         reinterpret_cast<void (*)(u8*, void*)>(*reinterpret_cast<uintptr_t*>(vt + 0x18))(anim, &q);
         reinterpret_cast<void (*)(float, void*)>(*reinterpret_cast<uintptr_t*>(ft + 0x158))((float)(count - 1), *reinterpret_cast<void**>(anim + 8));
-        Log("bridges: tab bar laid out for %d tabs", (int)count);
+        static u32 s_Logged = 0;
+        if (s_Logged != count) { s_Logged = count; Log("bridges: tab bar laid out for %d tabs", (int)count); }
     }
 
     /* 0x340b120 (the menu's tab-changed handler): remember the menu and its tab. */
     void HomeTabChanged(u8* menu) {
         if (!menu || !EditorMap()) return;
         s_HomeMenu = menu;
+        if (u8* strip = menu + 0x1c260; strip == s_HomeStrip)
+            HomeTabBarCount(HomeBar(), *reinterpret_cast<u32*>(strip + 0x28));
         Log("bridges: menu tab %d", *reinterpret_cast<s32*>(menu + MenuTabIndex));
     }
 
@@ -1639,6 +1642,8 @@ namespace sl {
     /* 0x340de50 (fill the grid for the current tab; tabs 0-4 set the item count at +0x1c1f0,
        other tabs keep it): the Bridges tab has one cell per bridge material. */
     void HomeGridFill(u8* menu) {
+        if (menu && EditorMap() && menu + 0x1c260 == s_HomeStrip)   /* also lays the tab bar out */
+            HomeTabBarCount(HomeBar(), *reinterpret_cast<u32*>(s_HomeStrip + 0x28));
         if (!menu || !EditorMap() || *reinterpret_cast<s32*>(menu + MenuTabIndex) != BridgeTab) return;
         *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
     }
@@ -1723,7 +1728,7 @@ namespace sl {
 
     /* 0x3036ca0(strip, owner, first tab): a menu opened on a bridge starts on the Bridges tab. */
     u32 HomeTabStart(u8* strip, u32 first) {
-        if (!MenuOnBridge() || !strip || *reinterpret_cast<u8**>(strip + 0x20) != s_HomeBar) return first;
+        if (!MenuOnBridge() || !strip || strip != s_HomeStrip) return first;
         Log("bridges: menu opens on the Bridges tab");
         return BridgeTab;
     }
