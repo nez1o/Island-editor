@@ -71,9 +71,10 @@ def read_bfres(d):
             pos = read_attr(d, vt['attrs']['_p0'], vt['count'])
             uv = read_attr(d, vt['attrs']['_u0'], vt['count']) if '_u0' in vt['attrs'] else None
             uv1 = read_attr(d, vt['attrs']['_u1'], vt['count']) if '_u1' in vt['attrs'] else None
+            col = read_attr(d, vt['attrs']['_c0'], vt['count']) if '_c0' in vt['attrs'] else None
             isz = 2 if ifmt == 1 else 4
             idx = [struct.unpack_from('<H' if isz == 2 else '<I', d, buf_base + ioff + i * isz)[0] + ifirst for i in range(icount)]
-            shapes.append(dict(name=_str(d, _q(d, s + 8)), pos=pos, uv=uv, uv1=uv1, idx=idx, material=mats[mat_i]))
+            shapes.append(dict(name=_str(d, _q(d, s + 8)), pos=pos, uv=uv, uv1=uv1, col=col, idx=idx, material=mats[mat_i]))
         models[name] = shapes
     texs = {}
     if emb:
@@ -96,6 +97,7 @@ def read_attr(d, a, n):
         elif fmt == 0x0512: out.append(tuple(float_half(x) for x in struct.unpack_from('<HH', d, p)))
         elif fmt == 0x0112: out.append(tuple(x / 65535 for x in struct.unpack_from('<HH', d, p)))
         elif fmt == 0x0212: out.append(tuple(max(-1, x / 32767) for x in struct.unpack_from('<hh', d, p)))
+        elif fmt == 0x010b: out.append(tuple(x / 255 for x in struct.unpack_from('<BBBB', d, p)))
         else: raise ValueError('attribute format %04x' % fmt)
     return out
 
@@ -154,7 +156,7 @@ def srgb_to_lin(c): c /= 255; return c / 12.92 if c <= 0.04045 else ((c + 0.055)
 def lin_to_srgb(c): c = max(0.0, min(1.0, c)); return round(255 * (c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055))
 
 
-def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow')):
+def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1):
     """Orthographic 3/4 view of the shapes, fitted to the picture; returns rows of RGBA."""
     W = size * ss
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
@@ -169,6 +171,8 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         if any(k in s['name'] or k in s['material']['name'] for k in skip): continue
         alb = next((t for t in s['material']['tex'] if t.endswith('_Alb')), s['material']['tex'][0] if s['material']['tex'] else None)
         tex = texs.get(alb)
+        mixn = next((t for t in s['material']['tex'] if t.endswith('_Mix')), None)
+        mix = texs.get(mixn) if mixn else None
         mn = s['material']['name']
         flat = (104, 168, 78) if 'Grass' in mn else (148, 118, 84) if 'Cliff' in mn else (180, 170, 160)
         vp = [view(p) for p in s['pos']]
@@ -177,7 +181,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
             u1 = s['uv1'] or s['uv'] or [(0, 0)] * len(s['pos'])
             tris.append((vp[a], vp[b], vp[c], s['pos'][a], s['pos'][b], s['pos'][c],
                          s['uv'][a] if s['uv'] else (0, 0), s['uv'][b] if s['uv'] else (0, 0), s['uv'][c] if s['uv'] else (0, 0), tex,
-                         u1[a], u1[b], u1[c], flat))
+                         u1[a], u1[b], u1[c], flat, mix))
     if not tris: return None
     xs = [v[0] for t in tris for v in t[:3]]; ys = [v[1] for t in tris for v in t[:3]]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
@@ -195,7 +199,8 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     light = (-0.45, 0.8, 0.4); ln = math.sqrt(sum(v * v for v in light)); light = tuple(v / ln for v in light)
     def strip(p):   # the atlas' saturated cyan / green / blue column: shader data, not a colour
         return max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150 or p[0] + p[1] + p[2] < 24
-    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat in tris:
+    blend_ch = int(os.environ.get('BLENDCH', str(blend)))
+    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat, mix in tris:
         # face normal (model space) for lighting
         e1 = [pb[i] - pa[i] for i in range(3)]; e2 = [pc[i] - pa[i] for i in range(3)]
         n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
@@ -226,6 +231,13 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                     v = w0 * ua[1] + w1 * ub[1] + w2 * uc[1]
                     r, g, b, a = trows[int(v % 1 * th) % th][int(u % 1 * tw) % tw]
                     if a < 128: continue
+                    if blend_ch >= 0 and mix:
+                        mw, mh, mrows = mix
+                        t = mrows[int(v % 1 * mh) % mh][int(u % 1 * mw) % mw][blend_ch] / 255
+                        u2 = w0 * ua1[0] + w1 * ub1[0] + w2 * uc1[0]
+                        v2 = w0 * ua1[1] + w1 * ub1[1] + w2 * uc1[1]
+                        r2, g2, b2, _ = trows[int(v2 % 1 * th) % th][int(u2 % 1 * tw) % tw]
+                        r, g, b = (round(r * (1 - t) + r2 * t), round(g * (1 - t) + g2 * t), round(b * (1 - t) + b2 * t))
                     if strip((r, g, b)):            # try the second UV set (the base colour of these faces)
                         u = w0 * ua1[0] + w1 * ub1[0] + w2 * uc1[0]
                         v = w0 * ua1[1] + w1 * ub1[1] + w2 * uc1[1]
@@ -278,7 +290,7 @@ if __name__ == '__main__':
     for arg in sys.argv[3:]:
         arch, _, model = arg.partition(':')
         res = load_archive(romfs, arch)
-        texs = {n: decode_texture(t, bn) for n, (t, bn) in res['textures'].items() if n.endswith('_Alb')}
+        texs = {n: decode_texture(t, bn) for n, (t, bn) in res['textures'].items() if n.endswith('_Alb') or n.endswith('_Mix')}
         for mname, shapes in res['models'].items():
             if model and mname != model: continue
             img = render(shapes, texs)
