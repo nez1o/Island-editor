@@ -19,7 +19,7 @@ jobs:
       - name: Build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          ./exlaunch.sh build
+          bash ./exlaunch.sh build
           ls -la deploy
       - uses: actions/upload-artifact@v4
         with:
