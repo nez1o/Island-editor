@@ -156,7 +156,7 @@ def srgb_to_lin(c): c /= 255; return c / 12.92 if c <= 0.04045 else ((c + 0.055)
 def lin_to_srgb(c): c = max(0.0, min(1.0, c)); return round(255 * (c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055))
 
 
-def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1, grey_to=None, deck=None):
+def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=('Snow', 'snow'), blend=-1, grey_to=None, deck=None, recolor=None):
     """Orthographic 3/4 view of the shapes, fitted to the picture; returns rows of RGBA."""
     W = size * ss
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
@@ -175,13 +175,14 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
         mix = texs.get(mixn) if mixn else None
         mn = s['material']['name']
         flat = (104, 168, 78) if 'Grass' in mn else (148, 118, 84) if 'Cliff' in mn else (180, 170, 160)
+        tint = next((c for k, c in (recolor or {}).items() if k in mn), None)
         vp = [view(p) for p in s['pos']]
         for i in range(0, len(s['idx']) - 2, 3):
             a, b, c = s['idx'][i:i + 3]
             u1 = s['uv1'] or s['uv'] or [(0, 0)] * len(s['pos'])
             tris.append((vp[a], vp[b], vp[c], s['pos'][a], s['pos'][b], s['pos'][c],
                          s['uv'][a] if s['uv'] else (0, 0), s['uv'][b] if s['uv'] else (0, 0), s['uv'][c] if s['uv'] else (0, 0), tex,
-                         u1[a], u1[b], u1[c], flat, mix))
+                         u1[a], u1[b], u1[c], flat, mix, tint))
     if not tris: return None
     xs = [v[0] for t in tris for v in t[:3]]; ys = [v[1] for t in tris for v in t[:3]]
     span = max(max(xs) - min(xs), max(ys) - min(ys))
@@ -209,7 +210,7 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
             t = t % 2.0
             return 2.0 - t if t > 1.0 else t
         return t
-    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat, mix in tris:
+    for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat, mix, tint in tris:
         # face normal (model space) for lighting
         e1 = [pb[i] - pa[i] for i in range(3)]; e2 = [pc[i] - pa[i] for i in range(3)]
         n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
@@ -267,6 +268,9 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
                         if strip((r, g, b)): r, g, b = base[id(tex)]
                 else:                               # texture lives in a shared archive: plain colour by material
                     r, g, b = flat
+                if tint:                            # the game recolours this material: keep the detail, new hue
+                    l = (r * 0.3 + g * 0.59 + b * 0.11) / 128
+                    r, g, b = (min(255, round(tint[0] * l)), min(255, round(tint[1] * l)), min(255, round(tint[2] * l)))
                 zbuf[y][x] = z
                 col[y][x] = (r, g, b, shade)
     out = []
