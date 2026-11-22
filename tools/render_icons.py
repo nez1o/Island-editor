@@ -191,14 +191,15 @@ def render(shapes, texs, size=300, ss=2, yaw=-35.0, pitch=28.0, fill=0.86, skip=
     for t in tris:
         tex = t[9]
         if tex is None or id(tex) in base: continue
-        px = [p for row in tex[2][::4] for p in row[::4] if not (max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150) and sum(p[:3]) >= 24]
+        px = [p for row in tex[2][::4] for p in row[::4] if not ((p[1] > 150 and p[1] - p[0] > 100) or (p[0] < 70 and p[1] > 120 and p[2] > 120) or (p[0] < 25 and p[2] > 150 and p[2] - p[1] > 60)) and sum(p[:3]) >= 24]
         px.sort(key=lambda p: p[0] + p[1] + p[2])
         base[id(tex)] = px[len(px) // 2][:3] if px else (170, 160, 150)
     zbuf = [[1e30] * W for _ in range(W)]
     col = [[None] * W for _ in range(W)]
     light = (-0.45, 0.8, 0.4); ln = math.sqrt(sum(v * v for v in light)); light = tuple(v / ln for v in light)
-    def strip(p):   # the atlas' saturated cyan / green / blue column: shader data, not a colour
-        return max(p[1], p[2]) - p[0] > 100 and max(p[1], p[2]) > 150 or p[0] + p[1] + p[2] < 24
+    def strip(p):   # the atlas' saturated cyan / green / pure-blue column: shader data, not a colour
+        r, g, b = p[:3]
+        return (g > 150 and g - r > 100) or (r < 70 and g > 120 and b > 120) or (r < 25 and b > 150 and b - g > 60) or r + g + b < 24
     blend_ch = int(os.environ.get('BLENDCH', str(blend)))
     for va, vb, vc, pa, pb, pc, ua, ub, uc, tex, ua1, ub1, uc1, flat, mix in tris:
         # face normal (model space) for lighting
