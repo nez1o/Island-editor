@@ -165,8 +165,10 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
   island grid is x160..1280, z160..1120). The middle must stay (720, 640): closing is recognised by it.
 - Camera/cursor: look-at `0x7f9070` (Vec3 in s0-s2), centring `0x13d5d30`, start `0x13c97d0`, cursor 1.25x via misc
   params `0x13c9440`. Place anywhere: can-place `0x13ea4c0` -> yes.
-- Close: teleport to the cursor (warp check + target `0x2309d50`; also write saved pos player+0xba4), clamped to the
-  island grid so a cursor out at sea doesn't drop the player in the water. Pressing B first snaps the cursor to the
+- Close: the player goes to the cursor, clamped to the island grid so a cursor out at sea doesn't drop the player in
+  the water. The game's warp (warp check answering 1, then target `0x2309d50`) played a ~1 s wipe, so the warp
+  check now answers 0 and the module writes the spot itself: saved pos player+0xba4, the position request
+  *(player+0x4c8)+0x2e8 (flags +0x2e4..6) and the live position player+0x29a0. Exit is seamless. Pressing B first snaps the cursor to the
   area middle (not through `0x13d5d30`) while the edit camera still runs; the camera then keeps the last real spot
   (`s_EditClosing`), otherwise it swung to the map middle for a moment.
 - Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)`.

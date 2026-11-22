@@ -658,6 +658,14 @@ namespace sl {
 
     bool EditorWarpAllowed() { return EditorMap() && s_WarpArmed && LiveLayout(s_EditLayout); }
 
+    /* Without the game's warp: the player's live position too (EditorWarpTarget already set the
+       saved position and the position request). */
+    void EditorPlacePlayerNow(const Vec3f& c) {
+        if (!s_LocalPlayer) return;
+        *reinterpret_cast<Vec3f*>(s_LocalPlayer + PlayerPos) = c;
+        Log("island editor: placed without the warp wipe");
+    }
+
     /* Until the cursor has been moved to the player, the camera looks at the player: the first
        frames would otherwise show the corner fallback or the last session's cursor. */
 
@@ -2529,7 +2537,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-test3 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-test4 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2827,7 +2835,15 @@ HOOK_DEFINE_TRAMPOLINE(EditRequestGate) {
 /* "Warp the player to the room entrance while editing" (player state 0x61). */
 HOOK_DEFINE_TRAMPOLINE(EditWarpCheck) {
     static u32 Callback() {
-        if (sl::EditorMap()) return sl::EditorWarpAllowed() ? 1 : 0;
+        if (sl::EditorMap()) {
+            /* Seamless exit: no game warp (it plays a ~1 s wipe to hide the jump); the player is put at
+               the cursor here and now, where the edit camera already looks (tested in Eden). */
+            if (sl::EditorWarpAllowed()) {
+                sl::Vec3f v;
+                if (sl::EditorWarpTarget(&v)) sl::EditorPlacePlayerNow(v);
+            }
+            return 0;
+        }
         return Orig();
     }
 };
