@@ -165,7 +165,9 @@ def icon_names():
     return [('B%d' % i, a, m) for i, (a, m) in enumerate(BRIDGE_ICONS)] + [('S%d' % i, a, m) for i, (a, m) in enumerate(INCLINE_ICONS)]
 
 
-def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
+def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None, pictures=None):
+    """pictures: a folder of 300x300 PNGs named B0..B7 / S0..S7 to use instead of renders (env
+    BRIDGE_PICTURES for build_romfs.py); kept outside the repository."""
     """Writes Model/Layout_HouseShapeIcon_<B0..B7, S0..S7>; returns {rstb path: size} (new entries)."""
     tpl = zs_read(os.path.join(romfs, 'Model', ICON_TEMPLATE + '.Nin_NX_NVN.zs'))
     (bf_name, bf), = list(sarc_files(tpl))
@@ -178,17 +180,21 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None):
     cache = {}
     sizes = {}
     for name, arch, model in icon_names():
-        if arch not in cache:
-            res = render_icons.load_archive(romfs, arch)
-            texs = {n: render_icons.decode_texture(tx, bn) for n, (tx, bn) in res['textures'].items() if n.endswith('_Alb') or n.endswith('_Mix')}
-            cache = {arch: (res, texs)}
-        res, texs = cache[arch]
-        # the iron bridge blends two albedo layers in its shader
-        # (in game its deck is plain wooden planks: drawn from the atlas' wood with a planar mapping)
-        img = render_icons.render(res['models'][model], texs, size=300,
-                                  deck=DECKS.get(arch), recolor=RECOLOR.get(arch),
-                                  scene='bridge' if arch.startswith('Bridge') else 'slope',
-                                  yaw=-125.0 if arch.startswith('Bridge') else -35.0, pitch=32.0)
+        pic = os.path.join(pictures, name + '.png') if pictures else None
+        if pic and os.path.exists(pic):     # a 300x300 picture supplied by the player (the shop's own previews)
+            import png
+            pw, ph, img = png.read(pic)
+            assert (pw, ph) == (300, 300), pic
+        else:                                # else render the game's model
+            if arch not in cache:
+                res = render_icons.load_archive(romfs, arch)
+                texs = {n: render_icons.decode_texture(tx, bn) for n, (tx, bn) in res['textures'].items() if n.endswith('_Alb') or n.endswith('_Mix')}
+                cache = {arch: (res, texs)}
+            res, texs = cache[arch]
+            img = render_icons.render(res['models'][model], texs, size=300,
+                                      deck=DECKS.get(arch), recolor=RECOLOR.get(arch),
+                                      scene='bridge' if arch.startswith('Bridge') else 'slope',
+                                      yaw=-125.0 if arch.startswith('Bridge') else -35.0, pitch=32.0)
         if preview_dir: render_icons.write_png(os.path.join(preview_dir, name + '.png'), img)
         linear = astc.encode(img, 4, 4)
         region = bytearray(t['size'])
@@ -248,5 +254,5 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
         blob = sarc_write(mult, [tuple(f) for f in files])
         zs_write(os.path.join(out, 'Message', 'String_%s.sarc.zs' % lang), blob)
         sizes['Message/String_%s.sarc' % lang] = len(blob)
-    sizes.update(build_icons(romfs, out, sarc_files, sarc_rebuild))
+    sizes.update(build_icons(romfs, out, sarc_files, sarc_rebuild, pictures=os.environ.get('BRIDGE_PICTURES')))
     return sizes
