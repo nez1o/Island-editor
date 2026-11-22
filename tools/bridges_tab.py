@@ -103,6 +103,21 @@ def extend_category_num(data):
                     k += [(f, v1, 0.0), (f, new, 0.0)]
         pai['entries'].append(dict(name='L_Category_%02d' % tab, kind=0, tags=[dict(tag='FLVI', infos=[
             dict(index=0, target=0, curve=1, keys=[(f - 1, 0), (f, 1)])])]))
+    # The HHP menu sets this animation to its 5-tab frame (4) itself, whatever the tab count (the
+    # module can't reach that call), so frame 4 shows the full 7-tab layout too. (In Happy Home
+    # Paradise's own menu the two extra slots then show as well.)
+    last = float(NEW_TABS[-1][0])
+    for e in pai['entries']:
+        for t in e['tags']:
+            for inf in t['infos']:
+                if inf['curve'] == 1:
+                    if e['name'].startswith('L_Category_') and int(e['name'][-2:]) >= 5:
+                        inf['keys'] = [(3.0, 0), (4.0, 1)]
+                    continue
+                k = inf['keys']
+                if not any(key[0] == last for key in k): continue
+                final = [key for key in k if key[0] == last][-1][1]
+                inf['keys'] = [key for key in k if key[0] < 4.0] + [(4.0, [key for key in k if key[0] <= 4.0][-1][1], 0.0), (4.0, final, 0.0), (last, final, 0.0)]
     return bflan.write(a)
 
 
