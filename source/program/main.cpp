@@ -3,6 +3,7 @@
 #include "nn/fs.hpp"
 #include "nn/os.hpp"
 #include "lib/nx/arm/cache.h"
+#include "lib/nx/kernel/svc.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -851,6 +852,7 @@ namespace sl {
     }
 
     static void RespawnHouse(u8* body);
+    static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
 
     /* -- component slots (x0 = component) -- */
     static void BldNoop(BldComp*) {}
@@ -875,9 +877,13 @@ namespace sl {
         const Vec3f* b = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
         float bx = b->x, bz = b->z;
         c->parts = 0;
+        bool structure = StructureOfBody(c->body) != 0;
+        if (structure) {   /* a bridge / incline is its body alone (a neighbour bridge came along) */
+            c->part[0] = c->body; c->pair[0] = 0x7f0; c->parts = 1;
+        }
         ForEachActor([&](u8* a) {
             u32 pair = PartPair(a);
-            if (!pair || c->parts >= MaxDragParts) return;
+            if (structure || !pair || c->parts >= MaxDragParts) return;
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + (VtOf(a) == SignVt ? 0x160 : pair));
             float dx = p->x - bx, dz = p->z - bz;
             if (dx < -8 || dx > 8 || dz < -8 || dz > 8) return;
@@ -909,7 +915,7 @@ namespace sl {
         c->dx = tx; c->dz = tz;
     }
 
-    /* 0x70: placement check - anywhere goes on the main island. */
+    /* 0x70: placement check - anywhere goes on the main island (bridges may stack too). */
     static u32 BldValid(BldComp* c, u64, const u8*) { return c->grabbed ? 1 : 0; }
 
     /* 0x78: drop at pos and keep it. */
@@ -1004,6 +1010,8 @@ namespace sl {
     }
 
     static Vec3f s_SpawnCam = {};        /* cursor when D-pad left was pressed */
+    static u32 s_HoverHandle = 0;        /* bridge / incline under the cursor (last hover lookup), or 0 */
+    bool RemoveStructure(u8* body);
     static u8* s_SpawnBody = nullptr;    /* the house borrowed to open the menu on */
 
     /* The menu frames its building: while spawning, the borrowed house reports the cursor's spot. */
@@ -1019,9 +1027,122 @@ namespace sl {
 
     /* The menu opens on the borrowed house, which made the edit camera fly to it: keep it here. */
     bool SpawnCameraHold(Vec3f* out) {
+        /* No menu came of the D-pad press: stop holding (the camera stayed put while the cursor left). */
+        if (s_SpawnArmed && !SpawnWithin(0, 800)) { s_SpawnArmed = false; s_SpawnBody = nullptr; Log("spawn menu: did not open"); }
         if (!(s_SpawnArmed || s_SpawnMode) || !out) return false;
+        /* The cursor moves again (menu closed, its close was missed): the camera follows it again. */
+        if (s_SpawnMode && LiveLayout(s_EditLayout)) {
+            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            float dx = c->x - s_SpawnCam.x, dz = c->z - s_SpawnCam.z;
+            if (dx * dx + dz * dz > 12.0f * 12.0f) {
+                s_SpawnMode = false; s_SpawnBody = nullptr;
+                Log("spawn menu: closed (cursor moved)");
+                return false;
+            }
+        }
         *out = s_SpawnCam;
         return true;
+    }
+
+    /* 0x7d10d4: the edit camera's point = look-at (0x7f9070) + an offset at *(cam+8)+0x30920. The
+       exterior menu zooms in on its house; while it is a spawn menu the camera keeps the offset it
+       had before the menu (logged when it changes, to confirm this is the zoom). */
+    static Vec3f s_CamOffset = {};
+    static bool s_CamOffsetSet = false;
+    void EditCameraPoint(u8* cam, Vec3f* out) {
+        if (!cam || !out || !EditorMap()) return;
+        u8* inner = *reinterpret_cast<u8**>(cam + 8);
+        if (!inner) return;
+        Vec3f off = *reinterpret_cast<const Vec3f*>(inner + 0x30920);
+        static Vec3f s_Logged = {};
+        static int s_Logs = 0;
+        float ch = (off.x - s_Logged.x) * (off.x - s_Logged.x) + (off.y - s_Logged.y) * (off.y - s_Logged.y) +
+                   (off.z - s_Logged.z) * (off.z - s_Logged.z);
+        if (ch > 0.25f && s_Logs < 80) {
+            s_Logs++; s_Logged = off;
+            Log("camera: offset (%d, %d, %d)%s", (int)(off.x * 10), (int)(off.y * 10), (int)(off.z * 10),
+                (s_SpawnArmed || s_SpawnMode) ? " - spawn menu, kept" : "");
+        }
+        if (s_SpawnArmed || s_SpawnMode) {
+            if (!s_CamOffsetSet) return;
+            out->x += s_CamOffset.x - off.x;
+            out->y += s_CamOffset.y - off.y;
+            out->z += s_CamOffset.z - off.z;
+            return;
+        }
+        s_CamOffset = off;
+        s_CamOffsetSet = true;
+    }
+
+    /* 0x7cfa20: the edit camera's second delegate (beside the look-at point 0x7d10d4): a Vec3 that
+       blends zoom presets (*(x0+8)+0x315e4 = preset index). Spawn menu: the value from before it. */
+    static Vec3f s_CamZoom = {};
+    static bool s_CamZoomSet = false;
+    static u8* s_DbgCam = nullptr;      /* edit camera controller, for the debug channel */
+
+    /* The exterior menu zooms onto its house by switching the camera's state machine (camera+0x408,
+       current state at +0x410) from the editor camera (0x13) to CamState::cDemo (0x22), through the
+       generic change-state 0x3dbb160 (found live: camera snapshot diff around the menu opening). A spawn
+       menu's house is only borrowed, so the camera stays the editor's. */
+    bool BlockCameraState(u8* sm, u32 state) {
+        if (state != 0x22 || !s_DbgCam || sm != s_DbgCam + 0x408 || !EditorMap()) return false;
+        if (!(s_SpawnArmed || s_SpawnMode)) return false;
+        Log("spawn menu: close-up camera skipped");
+        return true;
+    }
+    void DbgApplyHolds();
+    void EditCameraZoom(u8* self, Vec3f* v) {
+        if (!self || !v || !EditorMap()) return;
+        u8* cam = *reinterpret_cast<u8**>(self + 8);
+        s_DbgCam = cam;
+        DbgApplyHolds();
+        /* Diagnostic: which camera fields does the spawn menu change? Snapshot on D-pad left, diff
+           1.2 s later (values that moved, at most 80 lines). */
+        constexpr u32 SnapSize = 0x38000;
+        alignas(16) static u8 s_Snap[SnapSize];
+        static s64 s_SnapAt = 0;
+        static bool s_Diffed = true;
+        if (cam && s_SpawnAt && s_SpawnAt != s_SnapAt && SpawnWithin(0, 50)) {
+            memcpy(s_Snap, cam, SnapSize);
+            s_SnapAt = s_SpawnAt; s_Diffed = false;
+            Log("camera: snapshot at D-pad left (cam %lx)", (unsigned long)(uintptr_t)cam);
+        }
+        if (cam && !s_Diffed && s_SnapAt == s_SpawnAt && !SpawnWithin(0, 1200)) {
+            s_Diffed = true;
+            int n = 0;
+            for (u32 o = 0; o + 4 <= SnapSize && n < 80; o += 4) {
+                u32 ia = *reinterpret_cast<const u32*>(s_Snap + o), ib = *reinterpret_cast<const u32*>(cam + o);
+                if (ia == ib) continue;
+                float a = *reinterpret_cast<const float*>(s_Snap + o), b = *reinterpret_cast<const float*>(cam + o);
+                bool fa = (ia & 0x7f800000) != 0x7f800000 && (a > 1e-4f || a < -1e-4f) && a < 1e5f && a > -1e5f;
+                bool fb = (ib & 0x7f800000) != 0x7f800000 && (b > 1e-4f || b < -1e-4f) && b < 1e5f && b > -1e5f;
+                if (fa || fb) {
+                    float d = a - b; if (d < 0) d = -d;
+                    if (d < 0.05f) continue;
+                    Log("camera: +%x  %d -> %d (/100)", o, (int)(a * 100), (int)(b * 100));
+                } else if (ia < 0x10000 && ib < 0x10000) {
+                    Log("camera: +%x  int %d -> %d", o, (int)ia, (int)ib);
+                } else continue;
+                n++;
+            }
+            Log("camera: diff done, %d changes listed", n);
+        }
+        static Vec3f s_Logged = {};
+        static int s_Logs = 0;
+        float ch = (v->x - s_Logged.x) * (v->x - s_Logged.x) + (v->y - s_Logged.y) * (v->y - s_Logged.y) +
+                   (v->z - s_Logged.z) * (v->z - s_Logged.z);
+        if (ch > 0.01f && s_Logs < 120) {
+            s_Logs++; s_Logged = *v;
+            Log("camera: zoom (%d, %d, %d) /100, preset %d, t %d%s", (int)(v->x * 100), (int)(v->y * 100), (int)(v->z * 100),
+                cam ? *reinterpret_cast<s32*>(cam + 0x315e4) : -1, (int)(*reinterpret_cast<float*>(self + 0x10) * 100),
+                (s_SpawnArmed || s_SpawnMode) ? " - spawn menu, kept" : "");
+        }
+        if (s_SpawnArmed || s_SpawnMode) {
+            if (s_CamZoomSet) *v = s_CamZoom;
+            return;
+        }
+        s_CamZoom = *v;
+        s_CamZoomSet = true;
     }
 
     /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
@@ -1040,6 +1161,33 @@ namespace sl {
             Log("spawn menu: D-pad left");
         }
         s_LeftWas = left;
+        /* Button presses in the editor (which bit is which on the user's controller). */
+        static u64 s_PadWas = 0;
+        if (u64 down = newest & ~s_PadWas & 0xffff) Log("pad: pressed %llx (all %llx)", (unsigned long long)down, (unsigned long long)newest);
+        s_PadWas = newest;
+        /* Y on a hovered bridge / incline removes it (like Y on an item). */
+        static bool s_YWas = false;
+        bool y = (newest >> 3) & 1;
+        if (y && !s_YWas) Log("remove: Y pressed (cursor mode %d, hovered structure %x)", cursorMode ? 1 : 0, s_HoverHandle);
+        if (y && !s_YWas && cursorMode && LiveLayout(s_EditLayout)) {
+            /* The nearest bridge / incline to the cursor (the hover lookup runs for several cells, so
+               its last answer is not always the one under the cursor). */
+            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            u8* body = nullptr;
+            float best = 1e9f;
+            ForEachActor([&](u8* a) {
+                if (VtOf(a) != BuildingBodyVt) return;
+                int kind = StructureOfBody(a);
+                if (!kind) return;
+                float reach = kind == 26 ? BridgeReach : InclineReach;
+                const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+                float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
+                if (d < reach * reach && d < best) { best = d; body = a; }
+            });
+            if (!body) Log("remove: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
+            else if (RemoveStructure(body)) s_HoverHandle = 0;
+        }
+        s_YWas = y;
         if (!SpawnWithin(0, 400)) return;
         bool feedX = SpawnWithin(60, 110);
         for (int i = 0; i < count && i < 16; i++) {
@@ -1071,6 +1219,7 @@ namespace sl {
                 if (d < reach * reach && d < best) { best = d; body = a; }
             });
         }
+        s_HoverHandle = body && StructureOfBody(body) ? *reinterpret_cast<u32*>(body + 0x230) : 0;
         if (!body && s_SpawnArmed && SpawnWithin(0, 300)) {   /* spawn: borrow any house to open the menu on */
             ForEachActor([&](u8* a) {
                 if (!body && VtOf(a) == BuildingBodyVt && !IsBridgeBody(a)) body = a;
@@ -2171,6 +2320,7 @@ namespace sl {
        still has the old look's. It can't be rebuilt while the island editor runs (its play mode
        builds nothing: the bridge lost all collision), so it is done once the editor has closed. */
     static u64 s_ShapePending = 0;
+    static u64 s_RemovePending = 0;   /* of those: removed records (Y in the editor) - only clear the shape */
     static int s_ShapeWait = 0;
 
     /* Rebuild a swapped bridge / incline's slot the way the game does at island load (the type
@@ -2199,7 +2349,13 @@ namespace sl {
             if (!(s_ShapePending >> i & 1)) continue;
             s16 type = *reinterpret_cast<s16*>(recs + i * 0x14);
             u16 id = *reinterpret_cast<u16*>(recs + i * 0x14 + BridgeIdOffset);
-            if (type != BridgeBuildingType && type != InclineBuildingType) continue;
+            if (type != BridgeBuildingType && type != InclineBuildingType) {
+                if (type == 0 && (s_RemovePending >> i & 1)) {
+                    reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
+                    Log("spawn: walk shape of removed record %d cleared", i);
+                }
+                continue;
+            }
             u8* slot = field + 0x26f8 + 8 + i * 0x208;
             const char* oldName = type == BridgeBuildingType ? reinterpret_cast<const char*>(slot + 0x114)
                                                              : *reinterpret_cast<const char**>(slot + 0x1b0);
@@ -2212,6 +2368,7 @@ namespace sl {
                 *reinterpret_cast<u8**>(slot + 8), newName ? newName : "?");
         }
         s_ShapePending = 0;
+        s_RemovePending = 0;
         s_ShapeWait = 0;
         s_EditorClosed = false;
     }
@@ -2338,13 +2495,19 @@ namespace sl {
                type, position and look are the ones we wrote - keep the game's version from now on. */
             const u16* now = reinterpret_cast<const u16*>(r);
             const u16* mine = reinterpret_cast<const u16*>(s_New[i].raw);
-            if (now[0] == mine[0] && now[1] == mine[1] && now[2] == mine[2] && now[4] == mine[4]) {
+            if (now[0] == mine[0] && now[4] == mine[4]) {   /* same type and look: still ours */
+                if (now[1] != mine[1] || now[2] != mine[2] || now[3] != mine[3]) {
+                    LogRecord("spawn: record changed by the game, was", s_New[i].raw);
+                    LogRecord("spawn: record changed by the game, now", r);
+                }
                 memcpy(s_New[i].raw, r, 0x14);
                 continue;
             }
             bool empty = true;
             for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
             if (!empty) {   /* something else is there now */
+                LogRecord("spawn: forgotten, mine", s_New[i].raw);
+                LogRecord("spawn: forgotten, now ", r);
                 Log("spawn: record %d taken by something else - forgotten", s_New[i].idx);
                 s_New[i--] = s_New[--s_NewCount];
                 continue;
@@ -2356,8 +2519,66 @@ namespace sl {
         }
     }
 
+    /* ---- Y removes a bridge / incline: its record is emptied, its actor deleted now, its walkable shape
+       cleared once the editor has closed. The editor's closing restore brings the record (and the actor)
+       back: KeepRemoved empties it again and deletes the actor of that record. ---- */
+    struct RemovedStructure { int idx; u8 raw[0x14]; };
+    static RemovedStructure s_Removed[16];
+    static int s_RemovedCount = 0;
+
+    static void DeleteActorsOfRecord(int idx) {
+        using DelFn = void (*)(u8*);
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == (u32)idx && StructureOfBody(a))
+                reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+        });
+    }
+
+    bool RemoveStructure(u8* body) {
+        u8* recs = BuildingRecords();
+        int type = StructureOfBody(body);
+        u32 idx = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        if (!recs || !type || idx >= 47 || s_RemovedCount >= 16) return false;
+        RemovedStructure& r = s_Removed[s_RemovedCount++];
+        r.idx = (int)idx;
+        memcpy(r.raw, recs + idx * 0x14, 0x14);
+        for (int i = 0; i < s_NewCount; i++) if (s_New[i].idx == (int)idx) s_New[i--] = s_New[--s_NewCount];
+        for (int i = 0; i < s_OverrideCount; i++) if (s_Overrides[i].idx == (int)idx) s_Overrides[i--] = s_Overrides[--s_OverrideCount];
+        u8 zero[0x14] = {};
+        WriteRecord((int)idx, zero);
+        using DelFn = void (*)(u8*);
+        reinterpret_cast<DelFn>(Main(ActorRequestDelete))(body);
+        s_ShapePending |= 1ull << idx;
+        s_RemovePending |= 1ull << idx;
+        Log("spawn: removed %s record %d (id %x)", type == BridgeBuildingType ? "bridge" : "incline", (int)idx,
+            *reinterpret_cast<u16*>(r.raw + 8));
+        return true;
+    }
+
+    static void KeepRemoved() {
+        u8* recs = BuildingRecords();
+        if (!recs) return;
+        for (int i = 0; i < s_RemovedCount; i++) {
+            const u16* now = reinterpret_cast<const u16*>(recs + s_Removed[i].idx * 0x14);
+            const u16* was = reinterpret_cast<const u16*>(s_Removed[i].raw);
+            if (now[0] == 0) continue;                                    /* still empty */
+            if (now[0] != was[0] || now[1] != was[1] || now[2] != was[2] || now[4] != was[4]) {
+                Log("spawn: removed record %d reused - forgotten", s_Removed[i].idx);
+                s_Removed[i--] = s_Removed[--s_RemovedCount];
+                continue;
+            }
+            u8 zero[0x14] = {};
+            WriteRecord(s_Removed[i].idx, zero);
+            DeleteActorsOfRecord(s_Removed[i].idx);
+            s_ShapePending |= 1ull << s_Removed[i].idx;
+            s_RemovePending |= 1ull << s_Removed[i].idx;
+            Log("spawn: removed record %d came back - emptied again", s_Removed[i].idx);
+        }
+    }
+
     /* Game thread, every frame. */
     void BridgeTick() {
+        KeepRemoved();
         KeepNew();
         KeepOverrides();
         RebuildShapes();
@@ -2713,6 +2934,215 @@ namespace sl {
         s_AppSave = true;
     }
 
+    /* ---- live debug channel ----
+       The watch thread reads slumbertoggle/cmd.txt (4x a second), runs its lines, writes the answers
+       to slumbertoggle/dbg_out.txt and deletes cmd.txt (work-tools/dbg.py does the round trip).
+       Nothing stops the game; every address is checked with svcQueryMemory first.
+       Addresses: names main, cam, player, layout, recs, hex numbers, + / -, [expr] = u64 at expr.
+         peek <addr> [words]          hex + float per word
+         poke <addr> <hex32>...       pokef <addr> <float>...
+         hold <addr> <float>          written every editor frame (8 max); unhold clears all
+         snap <addr> <bytes>          remember a block;  diff  lists words that changed since */
+    constexpr const char* CmdPath    = "slsd:/slumbertoggle/cmd.txt";
+    constexpr const char* DbgOutPath = "slsd:/slumbertoggle/dbg_out.txt";
+    static char s_DbgOut[0x8000];
+    static size_t s_DbgLen = 0;
+    struct DbgHold { uintptr_t addr; float v; };
+    static DbgHold s_Holds[8];
+    static std::atomic<int> s_HoldCount{0};
+    alignas(16) static u8 s_DbgSnap[0x40000];
+    static uintptr_t s_DbgSnapAddr = 0;
+    static size_t s_DbgSnapLen = 0;
+
+    static void DbgPrint(const char* fmt, ...) {
+        if (s_DbgLen >= sizeof(s_DbgOut) - 2) return;
+        va_list args;
+        va_start(args, fmt);
+        int n = vsnprintf(s_DbgOut + s_DbgLen, sizeof(s_DbgOut) - s_DbgLen - 1, fmt, args);
+        va_end(args);
+        if (n < 0) return;
+        s_DbgLen += (size_t)n;
+        if (s_DbgLen > sizeof(s_DbgOut) - 2) s_DbgLen = sizeof(s_DbgOut) - 2;
+        s_DbgOut[s_DbgLen++] = '\n';
+    }
+
+    static bool MemOk(uintptr_t a, size_t len, bool write) {
+        while (len) {
+            MemoryInfo mi = {};
+            u32 pi = 0;
+            if (R_FAILED(svcQueryMemory(&mi, &pi, a))) return false;
+            if (!(mi.perm & (write ? 2 : 1)) || mi.type == 0) return false;
+            uintptr_t end = mi.addr + mi.size;
+            if (end <= a) return false;
+            size_t chunk = end - a < len ? end - a : len;
+            a += chunk; len -= chunk;
+        }
+        return true;
+    }
+
+    static const char* SkipWs(const char* p) { while (*p == ' ' || *p == '\t') p++; return p; }
+
+    static bool DbgExpr(const char*& p, uintptr_t* out);
+    static bool DbgTerm(const char*& p, uintptr_t* out) {
+        p = SkipWs(p);
+        if (*p == '[') {
+            p++;
+            uintptr_t a;
+            if (!DbgExpr(p, &a)) return false;
+            p = SkipWs(p);
+            if (*p != ']') return false;
+            p++;
+            if (!MemOk(a, 8, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return false; }
+            *out = *reinterpret_cast<const uintptr_t*>(a);
+            return true;
+        }
+        struct { const char* name; uintptr_t v; } names[] = {
+            { "main", exl::util::modules::GetTargetStart() }, { "cam", (uintptr_t)s_DbgCam },
+            { "player", (uintptr_t)s_LocalPlayer }, { "layout", (uintptr_t)s_EditLayout },
+            { "recs", (uintptr_t)BuildingRecords() },
+            { "mod", exl::util::modules::GetSelfStart() },
+        };
+        for (auto& n : names) {
+            size_t l = strlen(n.name);
+            if (strncmp(p, n.name, l) == 0 && !((p[l] >= 'a' && p[l] <= 'z') || (p[l] >= '0' && p[l] <= '9'))) {
+                p += l; *out = n.v;
+                return true;
+            }
+        }
+        char* end = nullptr;
+        unsigned long long v = strtoull(p, &end, 16);
+        if (end == p) return false;
+        p = end; *out = (uintptr_t)v;
+        return true;
+    }
+    static bool DbgExpr(const char*& p, uintptr_t* out) {
+        uintptr_t v;
+        if (!DbgTerm(p, &v)) return false;
+        while (true) {
+            p = SkipWs(p);
+            if (*p != '+' && *p != '-') break;
+            char op = *p++;
+            uintptr_t t;
+            if (!DbgTerm(p, &t)) return false;
+            v = op == '+' ? v + t : v - t;
+        }
+        *out = v;
+        return true;
+    }
+
+    /* Editor frames: keep the held values. */
+    void DbgApplyHolds() {
+        int n = s_HoldCount.load(std::memory_order_acquire);
+        for (int i = 0; i < n; i++) *reinterpret_cast<float*>(s_Holds[i].addr) = s_Holds[i].v;
+    }
+
+    static void DbgLine(char* line) {
+        const char* p = SkipWs(line);
+        if (!*p || *p == '#') return;
+        char cmd[16] = {};
+        int ci = 0;
+        while (*p && *p != ' ' && ci < 15) cmd[ci++] = *p++;
+        DbgPrint("> %s", line);
+        if (strcmp(cmd, "unhold") == 0) { s_HoldCount.store(0); DbgPrint("holds cleared"); return; }
+        if (strcmp(cmd, "diff") == 0) {
+            if (!s_DbgSnapLen || !MemOk(s_DbgSnapAddr, s_DbgSnapLen, false)) { DbgPrint("! no snapshot"); return; }
+            const u8* now = reinterpret_cast<const u8*>(s_DbgSnapAddr);
+            int n = 0;
+            for (size_t o = 0; o + 4 <= s_DbgSnapLen && n < 400; o += 4) {
+                u32 a = *reinterpret_cast<const u32*>(s_DbgSnap + o), b = *reinterpret_cast<const u32*>(now + o);
+                if (a == b) continue;
+                float fa, fb;
+                memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
+                DbgPrint("+%05lx  %08x -> %08x   %.4f -> %.4f", (unsigned long)o, a, b, (double)fa, (double)fb);
+                n++;
+            }
+            DbgPrint("%d words changed%s", n, n >= 400 ? " (list cut at 400)" : "");
+            return;
+        }
+        uintptr_t a;
+        if (!DbgExpr(p, &a)) { DbgPrint("! bad address"); return; }
+        if (strcmp(cmd, "addr") == 0) { DbgPrint("= %lx (main+%lx)", (unsigned long)a, (unsigned long)(a - exl::util::modules::GetTargetStart())); return; }
+        if (strcmp(cmd, "peek") == 0) {
+            long words = strtol(SkipWs(p), nullptr, 0);
+            if (words <= 0) words = 16;
+            if (words > 1024) words = 1024;
+            if (!MemOk(a, words * 4, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            for (long i = 0; i < words; i++) {
+                u32 w = reinterpret_cast<const u32*>(a)[i];
+                float f;
+                memcpy(&f, &w, 4);
+                DbgPrint("%lx +%03lx  %08x  %.4f", (unsigned long)(a + i * 4), (unsigned long)(i * 4), w, (double)f);
+            }
+            return;
+        }
+        if (strcmp(cmd, "snap") == 0) {
+            long len = strtol(SkipWs(p), nullptr, 0);
+            if (len <= 0 || len > (long)sizeof(s_DbgSnap)) len = sizeof(s_DbgSnap);
+            if (!MemOk(a, len, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            memcpy(s_DbgSnap, reinterpret_cast<const void*>(a), len);
+            s_DbgSnapAddr = a; s_DbgSnapLen = len;
+            DbgPrint("snapshot of %lx, %ld bytes", (unsigned long)a, len);
+            return;
+        }
+        bool isF = strcmp(cmd, "pokef") == 0, isHold = strcmp(cmd, "hold") == 0;
+        if (strcmp(cmd, "poke") == 0 || isF || isHold) {
+            int i = 0;
+            p = SkipWs(p);
+            while (*p) {
+                char* end = nullptr;
+                u32 w;
+                if (isF || isHold) { float f = strtof(p, &end); memcpy(&w, &f, 4); }
+                else w = (u32)strtoul(p, &end, 16);
+                if (end == p) break;
+                p = SkipWs(end);
+                uintptr_t at = a + i * 4;
+                if (!MemOk(at, 4, true)) { DbgPrint("! cannot write %lx", (unsigned long)at); return; }
+                if (isHold) {
+                    int n = s_HoldCount.load();
+                    if (n >= 8) { DbgPrint("! 8 holds already"); return; }
+                    memcpy(&s_Holds[n].v, &w, 4);
+                    s_Holds[n].addr = at;
+                    s_HoldCount.store(n + 1, std::memory_order_release);
+                }
+                *reinterpret_cast<u32*>(at) = w;
+                DbgPrint("%s %lx = %08x", isHold ? "held" : "wrote", (unsigned long)at, w);
+                i++;
+            }
+            return;
+        }
+        DbgPrint("! unknown command '%s'", cmd);
+    }
+
+    static void DbgPoll() {
+        nn::fs::FileHandle h;
+        if (R_FAILED(nn::fs::OpenFile(&h, CmdPath, nn::fs::OpenMode_Read))) return;
+        long size = 0;
+        nn::fs::GetFileSize(&size, h);
+        static char buf[4096];
+        if (size > (long)sizeof(buf) - 1) size = sizeof(buf) - 1;
+        if (size < 0) size = 0;
+        nn::fs::ReadFile(h, 0, buf, size);
+        nn::fs::CloseFile(h);
+        buf[size] = 0;
+        s_DbgLen = 0;
+        for (char* line = buf; line && *line;) {
+            char* next = strchr(line, '\n');
+            if (next) *next++ = 0;
+            size_t l = strlen(line);
+            if (l && line[l - 1] == '\r') line[l - 1] = 0;
+            DbgLine(line);
+            line = next;
+        }
+        DbgPrint("# done");
+        nn::fs::DeleteFile(DbgOutPath);
+        nn::fs::CreateFile(DbgOutPath, s_DbgLen);
+        if (R_SUCCEEDED(nn::fs::OpenFile(&h, DbgOutPath, nn::fs::OpenMode_Write))) {
+            nn::fs::WriteFile(h, 0, s_DbgOut, s_DbgLen, nn::fs::WriteOption::CreateOption(nn::fs::WriteOptionFlag_Flush));
+            nn::fs::CloseFile(h);
+        }
+        nn::fs::DeleteFile(CmdPath);
+    }
+
     /* ---- startup ---- */
 
     alignas(0x1000) static u8 s_ThreadStack[0x4000];
@@ -2720,7 +3150,10 @@ namespace sl {
 
     static void WatchThread(void*) {
         while (true) {
-            nn::os::SleepThread(nn::TimeSpan::FromSeconds(1));
+            for (int q = 0; q < 4; q++) {   /* debug commands 4x a second */
+                nn::os::SleepThread(nn::TimeSpan::FromMilliSeconds(250));
+                DbgPoll();
+            }
             FlushLog();
             if (s_AppSave.exchange(false)) WriteDefaultToggles();   /* changes made in the Slumber app */
             if (ReadToggles()) ApplyAll();
@@ -2743,7 +3176,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-spawntest7 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-spawntest17 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -3106,6 +3539,31 @@ HOOK_DEFINE_TRAMPOLINE(EditCameraFocus) {
         sl::Vec3f v;
         if (sl::EditCameraTarget(&v)) return v;
         return Orig();
+    }
+};
+
+/* Edit camera point = look-at + offset (x0 = camera, x1 = out). */
+HOOK_DEFINE_TRAMPOLINE(EditCameraPointHook) {
+    static void Callback(u8* cam, sl::Vec3f* out) {
+        Orig(cam, out);
+        sl::EditCameraPoint(cam, out);
+    }
+};
+
+/* Generic state machine change-state (x0 = state machine, w1 = new state). */
+HOOK_DEFINE_TRAMPOLINE(StateChangeHook) {
+    static void Callback(u8* sm, u32 state) {
+        if (sl::BlockCameraState(sm, state)) return;
+        Orig(sm, state);
+    }
+};
+
+/* Edit camera zoom blend (x0 = delegate owner, x1 = params); Vec3 back in s0-s2. */
+HOOK_DEFINE_TRAMPOLINE(EditCameraZoomHook) {
+    static sl::Vec3f Callback(u8* self, u8* params) {
+        sl::Vec3f v = Orig(self, params);
+        sl::EditCameraZoom(self, &v);
+        return v;
     }
 };
 
@@ -3518,6 +3976,9 @@ extern "C" void exl_main(void* x0, void* x1) {
     EditStart::InstallAtOffset(0x13c97d0);
     EditCursorCentre::InstallAtOffset(0x13d5d30);
     EditCameraFocus::InstallAtOffset(0x7f9070);
+    EditCameraPointHook::InstallAtOffset(0x7d10d4);
+    EditCameraZoomHook::InstallAtOffset(0x7cfa20);
+    StateChangeHook::InstallAtOffset(0x3dbb160);
     EditCanPlace::InstallAtOffset(0x13ea4c0);
     BuildingHoverGate::InstallAtOffset(0x13cfd7c);
     BuildingAtCell::InstallAtOffset(0x13d0308);
