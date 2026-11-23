@@ -666,11 +666,15 @@ namespace sl {
         Log("island editor: placed without the warp wipe");
     }
 
+    /* Spawn menu (further down): while it opens / is open the camera stays where the cursor was. */
+    bool SpawnCameraHold(Vec3f* out);
+
     /* Until the cursor has been moved to the player, the camera looks at the player: the first
        frames would otherwise show the corner fallback or the last session's cursor. */
 
     bool EditCameraTarget(Vec3f* out) {
         if (!EditorMap()) return false;
+        if (SpawnCameraHold(out)) return true;
         if (LiveLayout(s_EditLayout)) SetCursorSpeed(s_EditLayout, true);
         if (LiveLayout(s_EditLayout) && !s_EditOpening && !s_CursorToPlayer) {
             /* Track the cursor for the closing warp; the re-centred spot (area middle) is not one. */
@@ -852,7 +856,14 @@ namespace sl {
     static void BldNoop(BldComp*) {}
 
     /* 0x20: footprint centre the way HHP reports it (z 5 in front of the body). */
+    bool SpawnPosFor(const u8* body, Vec3f* out);   /* spawn menu: the borrowed house stands at the cursor */
+
     static Vec3f* BldPos(BldComp* c) {
+        Vec3f sp;
+        if (SpawnPosFor(c->body, &sp)) {
+            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y, sp.z };
+            return &c->pos;
+        }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
         c->pos = { p->x, p->y - (c->grabbed ? BldLift : 0.0f), p->z - 5.0f };
         return &c->pos;
@@ -975,7 +986,71 @@ namespace sl {
     constexpr float BridgeReach = 28.0f;   /* a bridge is up to 5 tiles long: hover within this of its middle */
     constexpr float InclineReach = 18.0f;
 
+    /* ---- Spawn menu (D-pad left in the island editor) - TEST stage 1: open only ----
+       The exterior menu is a UI sequence the editor starts on X with the hovered building. D-pad left
+       in cursor mode arms a spawn: for a moment the hover answers a house even where there is none,
+       and an X press is fed in, so the editor opens the menu as usual; it then starts on the Bridges
+       tab and its picks are only logged (house design changes are blocked). */
+    static s64 s_SpawnAt = 0;            /* tick of the D-pad left press (0 = none) */
+    static bool s_SpawnArmed = false;    /* the next menu open is a spawn menu */
+    static bool s_SpawnMode = false;     /* the open menu is a spawn menu */
+    static s64 s_CursorQueryTick = 0;    /* last hover query: the editor's cursor mode is running */
+    static s64 NowTick() { return nn::os::GetSystemTick().GetInt64Value(); }
+    static s64 MsTicks(int ms) { return nn::os::GetSystemTickFrequency() * ms / 1000; }
+    static bool SpawnWithin(int fromMs, int toMs) {
+        if (!s_SpawnAt) return false;
+        s64 d = NowTick() - s_SpawnAt;
+        return d >= MsTicks(fromMs) && d < MsTicks(toMs);
+    }
+
+    static Vec3f s_SpawnCam = {};        /* cursor when D-pad left was pressed */
+    static u8* s_SpawnBody = nullptr;    /* the house borrowed to open the menu on */
+
+    /* The menu frames its building: while spawning, the borrowed house reports the cursor's spot. */
+    bool SpawnPosFor(const u8* body, Vec3f* out) {
+        if (!body || body != s_SpawnBody || !(s_SpawnArmed || s_SpawnMode) || !out) return false;
+        *out = s_SpawnCam;
+        return true;
+    }
+
+    /* The editor's per-frame house hover (0x13cfd7c) runs every frame in cursor mode, also with
+       the cursor standing still (the hover lookups only run while it moves). */
+    void CursorHeartbeat() { s_CursorQueryTick = NowTick(); }
+
+    /* The menu opens on the borrowed house, which made the edit camera fly to it: keep it here. */
+    bool SpawnCameraHold(Vec3f* out) {
+        if (!(s_SpawnArmed || s_SpawnMode) || !out) return false;
+        *out = s_SpawnCam;
+        return true;
+    }
+
+    /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
+    void EditorPad(void* states, int count) {
+        if (!states || count <= 0 || !EditorMap() || s_EditClosing) return;
+        u8* s = reinterpret_cast<u8*>(states);
+        u64 newest = *reinterpret_cast<u64*>(s + 8);
+        static bool s_LeftWas = false;
+        bool left = (newest >> 12) & 1;
+        bool cursorMode = s_CursorQueryTick && NowTick() - s_CursorQueryTick < MsTicks(150);
+        if (cursorMode && s_SpawnMode) { s_SpawnMode = false; s_SpawnBody = nullptr; Log("spawn menu: closed"); }
+        if (left && !s_LeftWas && cursorMode && !SpawnWithin(0, 400)) {
+            s_SpawnAt = NowTick();
+            s_SpawnArmed = true;
+            if (LiveLayout(s_EditLayout)) s_SpawnCam = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            Log("spawn menu: D-pad left");
+        }
+        s_LeftWas = left;
+        if (!SpawnWithin(0, 400)) return;
+        bool feedX = SpawnWithin(60, 110);
+        for (int i = 0; i < count && i < 16; i++) {
+            u64* b = reinterpret_cast<u64*>(s + i * 0x28 + 8);
+            *b &= ~(1ull << 12);                 /* the D-pad left press itself does nothing else */
+            if (feedX) *b |= 1ull << 2;          /* X */
+        }
+    }
+
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
+        s_CursorQueryTick = NowTick();
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
         float cz = *reinterpret_cast<const s32*>(query + 0xc) * 5.0f + 2.5f;
         u8* body = nullptr;
@@ -995,6 +1070,12 @@ namespace sl {
                 float d = (p->x - cx) * (p->x - cx) + (p->z - cz) * (p->z - cz);
                 if (d < reach * reach && d < best) { best = d; body = a; }
             });
+        }
+        if (!body && s_SpawnArmed && SpawnWithin(0, 300)) {   /* spawn: borrow any house to open the menu on */
+            ForEachActor([&](u8* a) {
+                if (!body && VtOf(a) == BuildingBodyVt && !IsBridgeBody(a)) body = a;
+            });
+            s_SpawnBody = body;
         }
         if (!body) return 0;
         BldComp* c = AttachComp(body);
@@ -1522,6 +1603,7 @@ namespace sl {
     bool BridgeDesignGet(u32 handle);
 
     bool HouseDesignGet(u8* out, u32 handle) {
+        if (s_SpawnArmed) { s_SpawnArmed = false; s_SpawnMode = true; Log("spawn menu: opened (handle %x)", handle); }
         HouseExt e;
         if (!out || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return out && BridgeDesignGet(handle);
         BridgeDesignGet(0);   /* a house: not on a bridge */
@@ -1537,6 +1619,7 @@ namespace sl {
     bool MenuOnBridge();
 
     bool HouseDesignSet(u32 handle, const u8* design) {
+        if (s_SpawnMode) { Log("spawn menu: house design change ignored"); return true; }
         if (BridgeTabOpen() || MenuOnBridge()) { Log("bridges: house pick ignored (menu on a bridge or incline / extra tab)"); return true; }
         HouseExt e;
         if (!design || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
@@ -1828,6 +1911,28 @@ namespace sl {
 
     static void LogRecord(const char* what, const u8* r);
 
+    /* TEST (spawn stage 2a): the facts needed to write a new record - the cursor, every building
+       record, and where each bridge / incline / house body really stands. Read-only. */
+    [[maybe_unused]] static void SpawnDump() {
+        if (LiveLayout(s_EditLayout)) {
+            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            Log("spawn dump: cursor %d %d %d", (int)c->x, (int)c->y, (int)c->z);
+        }
+        u8* recs = BuildingRecords();
+        if (recs) for (int i = 0; i < 47; i++) {
+            char tag[16];
+            snprintf(tag, sizeof(tag), "rec %02d", i);
+            LogRecord(tag, recs + i * 0x14);
+        }
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            u32 idx = *reinterpret_cast<u32*>(a + ActorRecordIndex);
+            u32 rot = *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(a + ActorTransform) + 0x2b4);
+            Log("spawn dump: body rec %d kind %d at %d %d %d rot %x", (int)idx, StructureOfBody(a), (int)p->x, (int)p->y, (int)p->z, rot);
+        });
+    }
+
     /* Building body of a bridge or incline: its record (body +0x174) has type 26 / 27. */
     static int StructureOfBody(u8* body) {
         u8* recs = BuildingRecords();
@@ -1841,6 +1946,7 @@ namespace sl {
     static int s_MenuKind = 0;      /* its record type (26 / 27) */
     bool ApplyInclinePick(int rec, int which);
     bool ApplyBridgePick(int rec, int material);
+    bool SpawnStructure(int tab, int cell);
 
     /* 0x2a914b0 for a bridge: the menu was opened on a bridge. The design stays "none" (0xffff),
        the menu then starts on the Bridges tab (HomeTabStart). */
@@ -1865,6 +1971,7 @@ namespace sl {
 
     /* 0x3036ca0(strip, owner, first tab): a menu opened on a bridge starts on the Bridges tab. */
     u32 HomeTabStart(u8* strip, u32 first) {
+        if (s_SpawnMode && strip && strip == s_HomeStrip) { Log("spawn menu: starts on the Bridges tab"); return (u32)BridgeTab; }
         if (!MenuOnBridge() || !strip || strip != s_HomeStrip) return first;
         int tab = s_MenuKind == InclineBuildingType ? InclineTab : BridgeTab;
         Log("bridges: menu opens on tab %d", tab);
@@ -1909,6 +2016,7 @@ namespace sl {
         if (idx < 0 || idx >= *reinterpret_cast<s32*>(list + 0x3cc)) idx = -1;
         Log("bridges: cell %d picked (slot %d)", idx, slot);
         int want = tab == BridgeTab ? BridgeBuildingType : InclineBuildingType;
+        if (s_SpawnMode) { Log("spawn menu: pick tab %d cell %d", tab, idx); if (idx >= 0) SpawnStructure(tab, idx); return; }
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
             else ApplyInclinePick(s_MenuBridge, idx);
@@ -2151,8 +2259,106 @@ namespace sl {
         return -1;
     }
 
+    /* ---- Spawn menu, stage 2: a pick creates a new bridge / incline at the cursor ----
+       Building records (save view and the land list, 47 x 0x14 bytes, little endian): +0 u16 type
+       (0 = empty slot, 26 bridge, 27 incline), +2 u16 X and +4 u16 Z in 5-unit steps (for bridges
+       and inclines X*5, Z*5 is exactly where the actor stands), +6 rotation in quarter turns, +8 u16
+       look id. The new record goes into the first empty slot, the building spawner builds it now and
+       its walkable shape is built once the editor has closed (s_ShapePending). Closing the editor
+       restores its opening snapshot, which empties the slot again: KeepNew writes it back. */
+    struct NewStructure { int idx; u8 raw[0x14]; };
+    static NewStructure s_New[16];
+    static int s_NewCount = 0;
+
+    static void SpawnRecordActor(int idx) {
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!field || !list) { Log("spawn: no building list"); return; }
+        BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
+        LogRecord("spawn: list record", record.raw);
+        u32 h = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
+        Log("spawn: record %d spawn requested, handle %x", idx, h);
+    }
+
+    static void WriteRecord(int idx, const u8* raw) {
+        u8* recs = BuildingRecords();
+        if (recs) memcpy(recs + idx * 0x14, raw, 0x14);
+        u8* e = LandBuildingEntry((u32)idx);
+        if (e && (!recs || e != recs + idx * 0x14)) memcpy(e, raw, 0x14);
+    }
+
+    bool SpawnStructure(int tab, int cell) {
+        u8* recs = BuildingRecords();
+        if (!recs || !LiveLayout(s_EditLayout) || cell < 0) return false;
+        s16 type;
+        u16 id;
+        if (tab == BridgeTab) {
+            if (cell >= BridgeMaterials) return false;
+            type = BridgeBuildingType; id = k_BridgeIds[cell][0];
+        } else if (tab == InclineTab) {
+            if (cell >= (int)(sizeof(k_InclineIds) / 2)) return false;
+            type = InclineBuildingType; id = k_InclineIds[cell];
+        } else return false;
+        int slot = -1;
+        for (int i = 0; i < 47 && slot < 0; i++) {
+            const u8* r = recs + i * 0x14;
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (empty) slot = i;
+        }
+        if (slot < 0 || s_NewCount >= 16) { Log("spawn: no free building slot"); return false; }
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8 raw[0x14] = {};
+        *reinterpret_cast<u16*>(raw + 0) = (u16)type;
+        *reinterpret_cast<u16*>(raw + 2) = (u16)(int)(c->x / 5.0f + 0.5f);
+        *reinterpret_cast<u16*>(raw + 4) = (u16)(int)(c->z / 5.0f + 0.5f);
+        *reinterpret_cast<u16*>(raw + 6) = 0;
+        *reinterpret_cast<u16*>(raw + 8) = id;
+        WriteRecord(slot, raw);
+        s_New[s_NewCount].idx = slot;
+        memcpy(s_New[s_NewCount].raw, raw, 0x14);
+        s_NewCount++;
+        Log("spawn: %s id %x in record %d at %d %d", type == BridgeBuildingType ? "bridge" : "incline", id, slot,
+            *reinterpret_cast<u16*>(raw + 2) * 5, *reinterpret_cast<u16*>(raw + 4) * 5);
+        SpawnRecordActor(slot);
+        s_ShapePending |= 1ull << slot;
+        return true;
+    }
+
+    /* The editor's closing restore empties new records again: put them back and rebuild them. */
+    static void KeepNew() {
+        u8* recs = BuildingRecords();
+        if (!recs) return;
+        for (int i = 0; i < s_NewCount; i++) {
+            u8* r = recs + s_New[i].idx * 0x14;
+            if (memcmp(r, s_New[i].raw, 0x14) == 0) continue;
+            /* The game fills in more of the record once the building is spawned: still ours when the
+               type, position and look are the ones we wrote - keep the game's version from now on. */
+            const u16* now = reinterpret_cast<const u16*>(r);
+            const u16* mine = reinterpret_cast<const u16*>(s_New[i].raw);
+            if (now[0] == mine[0] && now[1] == mine[1] && now[2] == mine[2] && now[4] == mine[4]) {
+                memcpy(s_New[i].raw, r, 0x14);
+                continue;
+            }
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (!empty) {   /* something else is there now */
+                Log("spawn: record %d taken by something else - forgotten", s_New[i].idx);
+                s_New[i--] = s_New[--s_NewCount];
+                continue;
+            }
+            WriteRecord(s_New[i].idx, s_New[i].raw);
+            Log("spawn: record %d was emptied - written back", s_New[i].idx);
+            SpawnRecordActor(s_New[i].idx);
+            s_ShapePending |= 1ull << s_New[i].idx;
+        }
+    }
+
     /* Game thread, every frame. */
     void BridgeTick() {
+        KeepNew();
         KeepOverrides();
         RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
@@ -2537,7 +2743,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-test7 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-spawntest7 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2940,6 +3146,7 @@ HOOK_DEFINE_INLINE(ThemeBannerHide) {
    map that wipe runs WipeSpeed times faster, so the screen changes almost at once while the game's
    own wipe logic (and whatever waits for it) runs as before. Door and other wipes are untouched. */
 constexpr float WipeSpeed = 120.0f;
+
 HOOK_DEFINE_INLINE(EditorWipeSpeed) {
     static void Callback(exl::hook::InlineFloatCtx* ctx) {
         u8* page = reinterpret_cast<u8*>(ctx->X[19]);
@@ -2952,7 +3159,7 @@ HOOK_DEFINE_INLINE(EditorWipeSpeed) {
 /* HHP's per-frame house hover (0x13cfd7c: play mode == HHP?) also runs on the main island. */
 HOOK_DEFINE_INLINE(BuildingHoverGate) {
     static void Callback(exl::hook::InlineCtx* ctx) {
-        if (sl::EditorMap()) ctx->X[8] = ctx->X[11];
+        if (sl::EditorMap()) { ctx->X[8] = ctx->X[11]; sl::CursorHeartbeat(); }
     }
 };
 
@@ -3229,6 +3436,7 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadDetail##type) {                                               \
         static int Callback(int* written, void* states, int count, const u32& id) {          \
             int r = Orig(written, states, count, id);                                        \
+            sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
             return r;                                                                        \
         }                                                                                    \
@@ -3236,12 +3444,14 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadStates##type) {                                               \
         static void Callback(void* states, int count, const u32& id) {                       \
             Orig(states, count, id);                                                         \
+            sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
         }                                                                                    \
     };                                                                                       \
     HOOK_DEFINE_TRAMPOLINE(NpadState##type) {                                                \
         static void Callback(void* state, const u32& id) {                                   \
             Orig(state, id);                                                                 \
+            sl::EditorPad(state, 1);                                           \
             sl::app::OnNpadStates(state, 1);                                                 \
         }                                                                                    \
     };
