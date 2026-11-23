@@ -522,6 +522,10 @@ namespace sl {
     static bool s_WarpArmed     = false;    /* editor has run: closing it may warp the player */
     static float s_WarpX = 0, s_WarpZ = 0;  /* cursor before closing re-centres it */
     static bool s_EditorClosed = false;     /* the editor just closed (its warp ran) */
+    static s64 s_CursorBAt = 0;             /* B pressed in the editor's cursor mode (no menu open): a real close */
+    static bool ClosedWithB() {
+        return s_CursorBAt && nn::os::GetSystemTick().GetInt64Value() - s_CursorBAt < (s64)nn::os::GetSystemTickFrequency() * 5;
+    }
     static bool s_EditClosing = false;      /* closing: the cursor was re-centred, camera stays put */
     static bool s_EditorPending = false;    /* app tapped: open the editor once the phone is gone */
     static int s_EditorSlot     = -1;       /* app id shown as the editor (3 or 4) */
@@ -559,6 +563,7 @@ namespace sl {
 
     void EditStart(u8* layout) {
         s_WarpArmed = false;
+        s_CursorBAt = 0;
         s_EditorClosed = false;
         s_EditClosing = false;
         s_EditLayout = layout;
@@ -575,7 +580,7 @@ namespace sl {
         if (!s_WarpArmed || layout != s_EditLayout || !LiveLayout(layout)) return;
         const Vec3f* c = reinterpret_cast<const Vec3f*>(layout + LayoutCursor);
         s_WarpX = c->x; s_WarpZ = c->z;
-        s_EditClosing = true;   /* the camera keeps looking here, not at the re-centred cursor */
+        if (ClosedWithB()) s_EditClosing = true;   /* the camera keeps looking here, not at the re-centred cursor */
     }
 
     void EditCursorStart(u8* layout) {
@@ -632,8 +637,23 @@ namespace sl {
     constexpr u32 PlayerSavedPos     = 0xba4;
     constexpr u32 PlayerPosRequest   = 0x4c8;       /* -> +0x2e4..0x2e6 flags, +0x2e8 Vec3f */
 
+    /* Closing the editor puts the cursor on the area middle first; the exterior menu closing
+       (spawn menu, B) also runs the warp check, with the cursor anywhere: that is not a close. */
+    static bool CursorAtEditCentre() {
+        if (!LiveLayout(s_EditLayout)) return false;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        float mx = (EditMinX + EditMaxX) * 0.5f, mz = (EditMinZ + EditMaxZ) * 0.5f;
+        return c->x - mx > -1 && c->x - mx < 1 && c->z - mz > -1 && c->z - mz < 1;
+    }
+
     bool EditorWarpTarget(Vec3f* out) {
         if (!EditorMap() || !s_WarpArmed || !LiveLayout(s_EditLayout)) return false;
+        s64 now = nn::os::GetSystemTick().GetInt64Value();
+        if (!CursorAtEditCentre() || !ClosedWithB()) {
+            static s64 s_LastNote = 0;
+            if (now - s_LastNote > nn::os::GetSystemTickFrequency() * 2) { s_LastNote = now; Log("island editor: warp check without B in cursor mode (a menu closed) - not a close"); }
+            return false;
+        }
         s_WarpArmed = false;
         /* The cursor may be out at sea: the player goes to the nearest spot on the island grid. */
         float wx = s_WarpX, wz = s_WarpZ;
@@ -657,7 +677,7 @@ namespace sl {
         return true;
     }
 
-    bool EditorWarpAllowed() { return EditorMap() && s_WarpArmed && LiveLayout(s_EditLayout); }
+    bool EditorWarpAllowed() { return EditorMap() && s_WarpArmed && s_CursorBAt && CursorAtEditCentre(); }
 
     /* Without the game's warp: the player's live position too (EditorWarpTarget already set the
        saved position and the position request). */
@@ -682,10 +702,10 @@ namespace sl {
             const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
             float mx = (EditMinX + EditMaxX) * 0.5f, mz = (EditMinZ + EditMaxZ) * 0.5f;
             bool centre = c->x - mx > -1 && c->x - mx < 1 && c->z - mz > -1 && c->z - mz < 1;
-            if (!s_WarpArmed || !centre) { s_WarpX = c->x; s_WarpZ = c->z; }
+            if (!s_WarpArmed || !centre) { s_WarpX = c->x; s_WarpZ = c->z; s_EditClosing = false; }
             /* Closing (B) puts the cursor on the area middle while the edit camera still runs, which
                swung the camera across the map for a moment (seen in Eden): it stays on the last spot. */
-            else if (s_WarpArmed && centre) s_EditClosing = true;
+            else if (s_WarpArmed && centre && ClosedWithB()) s_EditClosing = true;
             s_WarpArmed = true;
         }
         if ((s_EditOpening || s_CursorToPlayer || !LiveLayout(s_EditLayout)) && s_LocalPlayer) {
@@ -813,6 +833,37 @@ namespace sl {
         return *reinterpret_cast<u8**>(view + 8) + *reinterpret_cast<u64*>(view + 0x10);
     }
 
+    /* The save object (*(save root+0x10))[0] holds the live main.dat image at +0x10 and two more
+       full images: +0x18 (pointer) and +0x8 (an object with the image inline at +0x250). Save and
+       End writes from those, not from the live one, so building changes made by the module came
+       back after a reload (found live in Eden 2026-11-23: patching both copies kept a removed
+       bridge removed). The building list is copied into both after every change. Each copy is
+       only used when its first 16 bytes match the live image's header. */
+    constexpr u32 BuildingListBytes = 47 * 0x14;
+    static void SyncSaveCopies() {
+        u8* d = *reinterpret_cast<u8**>(Main(SaveRootGlobal));
+        if (!d || (d[0x453] & 1)) return;
+        u8** p3 = *reinterpret_cast<u8***>(d + 0x10);
+        u8* x = p3 ? *p3 : nullptr;
+        u8* data = x ? *reinterpret_cast<u8**>(x + 0x20) : nullptr;
+        if (!data) return;
+        u8* view = data + 0x70 + 0x116cc0;
+        u8* live = *reinterpret_cast<u8**>(view + 8);
+        u64 off = *reinterpret_cast<u64*>(view + 0x10);
+        if (!live || live != *reinterpret_cast<u8**>(x + 0x10)) return;
+        u8* inl = *reinterpret_cast<u8**>(x + 8);
+        u8* copies[2] = { *reinterpret_cast<u8**>(x + 0x18), inl ? inl + 0x250 : nullptr };
+        static int s_Warned = 0;
+        for (int i = 0; i < 2; i++) {
+            u8* c = copies[i];
+            if (!c || c == live || memcmp(c, live, 16) != 0) {
+                if (!(s_Warned & (1 << i))) { s_Warned |= 1 << i; Log("save copies: copy %d not found (%p) - not synced", i, c); }
+                continue;
+            }
+            if (memcmp(c + off, live + off, BuildingListBytes) != 0) memcpy(c + off, live + off, BuildingListBytes);
+        }
+    }
+
     static void SaveBuildingMove(u32 index, float bodyX, float bodyZ, s32 dcx, s32 dcz) {
         u8* recs = BuildingRecords();
         if (!recs) { Log("buildings: save records not found"); return; }
@@ -832,6 +883,7 @@ namespace sl {
         Log("buildings: record %d (type %d) (%d, %d) -> (%d, %d)", best, r[0], r[1], r[2], r[1] + dcx, r[2] + dcz);
         r[1] = (s16)(r[1] + dcx);
         r[2] = (s16)(r[2] + dcz);
+        SyncSaveCopies();
     }
 
     /* The island's building collision / occupied tiles, as HHP refreshes its house on grab and drop.
@@ -1191,6 +1243,12 @@ namespace sl {
             Log("spawn menu: D-pad left");
         }
         s_LeftWas = left;
+        /* B in cursor mode closes the editor; B in a menu only closes the menu (the game runs its
+           closing warp check for both, with the cursor on the area middle). */
+        static bool s_BWas = false;
+        bool bBtn = (newest >> 1) & 1;
+        if (bBtn && !s_BWas) s_CursorBAt = cursorMode && !SpawnBusy() ? NowTick() : 0;
+        s_BWas = bBtn;
         /* Y on a hovered bridge / incline removes it (like Y on an item). */
         static bool s_YWas = false;
         bool y = (newest >> 3) & 1;
@@ -2406,6 +2464,7 @@ namespace sl {
         s_RemovePending = 0;
         s_ShapeWait = 0;
         s_EditorClosed = false;
+        SyncSaveCopies();
     }
 
     static void RememberOverride(int idx, u16 oldId, u16 newId) {
@@ -2479,6 +2538,7 @@ namespace sl {
         if (recs) memcpy(recs + idx * 0x14, raw, 0x14);
         u8* e = LandBuildingEntry((u32)idx);
         if (e && (!recs || e != recs + idx * 0x14)) memcpy(e, raw, 0x14);
+        SyncSaveCopies();
     }
 
     bool SpawnStructure(int tab, int cell) {
@@ -3277,7 +3337,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-spawntest18 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-spawntest22 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");

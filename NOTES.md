@@ -238,12 +238,22 @@ Spawns bridges / inclines at the cursor from HHP's exterior menu, opened on a bo
   menu closed, needed a restart). Y / ZL / ZR on a nearby structure are handled in `EditorPad` and hidden
   from the game: Y removes (`RemoveStructure`), ZL turns a quarter (record +6), ZR cycles size
   (`k_BridgeIds[material][0..5]`), ZL/ZR only for spawned ones (`ReshapeStructure`). test18 untested.
-- **Open bug (important)**: closing the editor restores the building list from a copy the mod doesn't
-  update. Seen in test17: an original bridge removed with Y came back (record 23, id 4) and a spawned bridge
-  whose look was changed in the menu vanished (record 20: `s_New` had forgotten it after the look change).
-  Next step: with test18 running, `tools/dbg.py "find 1a00b400ba000300040000"`-style searches for a known
-  record (type, X, Z, rotation, id as little-endian u16s) to find the restore copy, then keep it in sync
-  in `WriteRecord` instead of the keeper hacks.
+- **Save copies (fixed in spawntest22)**: Save and End wrote building changes from a copy the mod didn't
+  update (a removed bridge came back after a reload, a spawned one vanished). The save object
+  `x = *(*(save root+0x10))` (save root = `*(main+0x5474040)`) holds the live main.dat image at x+0x10
+  (building list at +0x32f700 = `BuildingRecords()`) and two more full images: `*(x+0x18)` and
+  `*(x+8)+0x250` (inline in an object). Zeroing a removed bridge's record in both, live via dbg.py, kept it
+  removed after Save and End + reload. `SyncSaveCopies()` copies the 47-record list into both after
+  `WriteRecord`, `SaveBuildingMove` and `RebuildShapes` (only if a copy's first 16 bytes match the live
+  header). A 4th image sits in another heap region (no pointer path known); it wasn't needed.
+- **Menu close is not an editor close (spawntest20/21)**: closing HHP's exterior menu (spawn menu, B) also
+  re-centres the cursor on the area middle and runs the warp check, so the mod took it for the editor
+  closing (player moved, `s_EditClosing` stuck -> Y/ZL/ZR ignored, Y then went to the game and froze the
+  editor). Now a close needs B pressed in cursor mode with no spawn menu (`s_CursorBAt`, `ClosedWithB()`).
+- Live tests 2026-11-23 (spawntest20/21): Y remove, ZL turn, ZR resize work. Wishes: sound + dust cloud /
+  sparkles on removal, smooth turn/resize with fitting sounds.
+- `dbg.py find` over all memory takes ~5 min in Eden and blocks the watch thread (log, cmd.txt) meanwhile;
+  dbg.py gives up after 30 s, so poll `dbg_out.txt` yourself.
 - Still to do: Buildings tab (empty houses, shops & services, decorations) with pixel-art icons
   (`tools/bridges_tab.py` / `bridge_icons.py` show how tabs and icons are added), the D-pad left icon in the
   editor's D-pad guide (empty left slot), remove the test logging (camera snapshot/diff, zoom logs) before a release.
