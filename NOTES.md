@@ -221,6 +221,40 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 
+#### Spawn menu (D-pad left), branch `fix/editor-camera-area` — status 2026-11-22, build v0.64-spawntest18
+Spawns bridges / inclines at the cursor from HHP's exterior menu, opened on a borrowed house.
+- D-pad left in cursor mode (heartbeat from the hover gate `0x13cfd7c`) arms a spawn; X is fed in 60-110 ms
+  later; the hover borrows the first house; the menu starts on the Bridges tab; a grid pick calls
+  `SpawnStructure` (first empty record, cursor position /5, rotation 0, `k_BridgeIds[cell][0]` / `k_InclineIds`).
+  Spawned records are kept in `s_New` (`KeepNew` writes them back when the editor's closing restore empties them).
+- **Zoom fix**: the menu zooms by switching the edit camera's state machine (camera+0x408, current state
+  +0x410) from the editor camera (0x13) to `CamState::cDemo` (0x22) via the generic change-state `0x3dbb160`;
+  `BlockCameraState` refuses 0x22 for that state machine while a spawn menu is armed / open (tested, works).
+- Camera hold (`SpawnCameraHold`) releases after 0.8 s without a menu or once the cursor moves 12+ away.
+- Grab moves only the structure's own body (a neighbour bridge used to come along). Bridges may stack.
+- **Remove prompt**: building component slot `0xb0` = "can be removed" (found live by flipping the 8
+  return-0 slots `0x80`-`0xb8`): yes makes the editor show its own "Y Remove". `BldCanRemove` says yes only
+  for bridges / inclines and never around a spawn menu (yes on every building -> editor stuck after a spawn
+  menu closed, needed a restart). Y / ZL / ZR on a nearby structure are handled in `EditorPad` and hidden
+  from the game: Y removes (`RemoveStructure`), ZL turns a quarter (record +6), ZR cycles size
+  (`k_BridgeIds[material][0..5]`), ZL/ZR only for spawned ones (`ReshapeStructure`). test18 untested.
+- **Open bug (important)**: closing the editor restores the building list from a copy the mod doesn't
+  update. Seen in test17: an original bridge removed with Y came back (record 23, id 4) and a spawned bridge
+  whose look was changed in the menu vanished (record 20: `s_New` had forgotten it after the look change).
+  Next step: with test18 running, `tools/dbg.py "find 1a00b400ba000300040000"`-style searches for a known
+  record (type, X, Z, rotation, id as little-endian u16s) to find the restore copy, then keep it in sync
+  in `WriteRecord` instead of the keeper hacks.
+- Still to do: Buildings tab (empty houses, shops & services, decorations) with pixel-art icons
+  (`tools/bridges_tab.py` / `bridge_icons.py` show how tabs and icons are added), the D-pad left icon in the
+  editor's D-pad guide (empty left slot), remove the test logging (camera snapshot/diff, zoom logs) before a release.
+
+#### Live debug channel (spawntest14+)
+`tools/dbg.py` (Windows / Linux) talks to the module through `slumbertoggle/cmd.txt` / `dbg_out.txt` on
+Eden's SD card; the watch thread answers 4x a second, nothing pauses the game, every address is checked
+with `svcQueryMemory`. Typical use: `snap cam 38000`, do the thing in game, `diff`. Symbols of the module
+itself: `aarch64-none-elf-nm -C SlumberToggle.elf | grep name`, then `mod+<offset>` (e.g. live-patching our
+component vtable `sl::s_BldVt`). Prefer this to GDB (GDB pauses the game; it froze several times).
+
 ### Unlock all (`unlock_all`)
 Once per session on the island: player flags via `0x264bfe8(idx*, SafeString*, 1)` for every existing player,
 HHP flags via `0x2658bb8(SafeString*, 1)`. Names come from `Bcsv/EventFlagsPlayerParam` and

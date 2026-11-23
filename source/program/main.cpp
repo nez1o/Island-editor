@@ -943,6 +943,13 @@ namespace sl {
         Log("buildings: put back");
     }
 
+    /* 0xb0: "can be removed" - the editor shows its own "Y Remove" for the hovered object when this
+       says yes (found live by flipping the slots). Yes only for bridges / inclines, never while a
+       spawn menu (opened on a borrowed house) is involved: with yes on every building the editor got
+       stuck after a spawn menu closed. Y itself is handled in EditorPad, which hides it from the game. */
+    bool SpawnBusy();
+    static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && StructureOfBody(c->body) ? 1 : 0; }
+
     static void InitBldVtable() {
         if (s_BldVt[0]) return;
         const uintptr_t* game = reinterpret_cast<const uintptr_t*>(Main(BldCompVtable));
@@ -955,6 +962,7 @@ namespace sl {
         s_BldVt[0x68 / 8] = reinterpret_cast<const void*>(&BldDrag);
         s_BldVt[0x70 / 8] = reinterpret_cast<const void*>(&BldValid);
         s_BldVt[0x78 / 8] = reinterpret_cast<const void*>(&BldDrop);
+        s_BldVt[0xb0 / 8] = reinterpret_cast<const void*>(&BldCanRemove);
     }
 
     static bool CompInUse(BldComp& c) {
@@ -1013,6 +1021,7 @@ namespace sl {
     static u32 s_HoverHandle = 0;        /* bridge / incline under the cursor (last hover lookup), or 0 */
     bool RemoveStructure(u8* body);
     static u8* s_SpawnBody = nullptr;    /* the house borrowed to open the menu on */
+    bool SpawnBusy() { return s_SpawnArmed || s_SpawnMode; }
 
     /* The menu frames its building: while spawning, the borrowed house reports the cursor's spot. */
     bool SpawnPosFor(const u8* body, Vec3f* out) {
@@ -1145,6 +1154,27 @@ namespace sl {
         s_CamZoomSet = true;
     }
 
+    bool ReshapeStructure(u8* body, bool rotate, bool resize);
+
+    /* The bridge / incline nearest the cursor, within its reach (the hover lookup runs for several
+       cells, so its last answer is not always the one under the cursor). */
+    static u8* NearestStructure() {
+        if (!LiveLayout(s_EditLayout)) return nullptr;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8* body = nullptr;
+        float best = 1e9f;
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            int kind = StructureOfBody(a);
+            if (!kind) return;
+            float reach = kind == 26 ? BridgeReach : InclineReach;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
+            if (d < reach * reach && d < best) { best = d; body = a; }
+        });
+        return body;
+    }
+
     /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
     void EditorPad(void* states, int count) {
         if (!states || count <= 0 || !EditorMap() || s_EditClosing) return;
@@ -1161,32 +1191,37 @@ namespace sl {
             Log("spawn menu: D-pad left");
         }
         s_LeftWas = left;
-        /* Button presses in the editor (which bit is which on the user's controller). */
-        static u64 s_PadWas = 0;
-        if (u64 down = newest & ~s_PadWas & 0xffff) Log("pad: pressed %llx (all %llx)", (unsigned long long)down, (unsigned long long)newest);
-        s_PadWas = newest;
         /* Y on a hovered bridge / incline removes it (like Y on an item). */
         static bool s_YWas = false;
         bool y = (newest >> 3) & 1;
-        if (y && !s_YWas) Log("remove: Y pressed (cursor mode %d, hovered structure %x)", cursorMode ? 1 : 0, s_HoverHandle);
-        if (y && !s_YWas && cursorMode && LiveLayout(s_EditLayout)) {
-            /* The nearest bridge / incline to the cursor (the hover lookup runs for several cells, so
-               its last answer is not always the one under the cursor). */
-            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
-            u8* body = nullptr;
-            float best = 1e9f;
-            ForEachActor([&](u8* a) {
-                if (VtOf(a) != BuildingBodyVt) return;
-                int kind = StructureOfBody(a);
-                if (!kind) return;
-                float reach = kind == 26 ? BridgeReach : InclineReach;
-                const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
-                float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
-                if (d < reach * reach && d < best) { best = d; body = a; }
-            });
-            if (!body) Log("remove: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
-            else if (RemoveStructure(body)) s_HoverHandle = 0;
+        /* Y removes, ZL turns (quarter turn), ZR resizes the bridge / incline nearest the cursor;
+           those presses are then hidden from the game (it has its own Y path for removable objects). */
+        static bool s_ZlWas = false, s_ZrWas = false;
+        bool zl = (newest >> 8) & 1, zr = (newest >> 9) & 1;
+        u64 hide = 0;
+        static bool s_Hiding[3] = {};   /* decided on the press (before a removal), kept while held */
+        bool near = cursorMode && !SpawnBusy() && ((y && !s_YWas) || (zl && !s_ZlWas) || (zr && !s_ZrWas)) && NearestStructure();
+        if (y && !s_YWas) s_Hiding[0] = near;
+        if (zl && !s_ZlWas) s_Hiding[1] = near;
+        if (zr && !s_ZrWas) s_Hiding[2] = near;
+        if (cursorMode && !SpawnBusy() && LiveLayout(s_EditLayout) && ((y && !s_YWas) || (zl && !s_ZlWas) || (zr && !s_ZrWas))) {
+            u8* body = NearestStructure();
+            if (!body) {
+                const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+                Log("structures: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
+            } else if (y && !s_YWas) {
+                if (RemoveStructure(body)) s_HoverHandle = 0;
+            } else if (zl && !s_ZlWas) ReshapeStructure(body, true, false);
+            else ReshapeStructure(body, false, true);
         }
+        if (!y) s_Hiding[0] = false;
+        if (!zl) s_Hiding[1] = false;
+        if (!zr) s_Hiding[2] = false;
+        if (s_Hiding[0]) hide |= 1ull << 3;
+        if (s_Hiding[1]) hide |= 1ull << 8;
+        if (s_Hiding[2]) hide |= 1ull << 9;
+        if (hide) for (int i = 0; i < count && i < 16; i++) *reinterpret_cast<u64*>(s + i * 0x28 + 8) &= ~hide;
+        s_ZlWas = zl; s_ZrWas = zr;
         s_YWas = y;
         if (!SpawnWithin(0, 400)) return;
         bool feedX = SpawnWithin(60, 110);
@@ -2519,6 +2554,37 @@ namespace sl {
         }
     }
 
+    /* ZL / ZR on a bridge / incline you spawned: a quarter turn (record +6) or the next size (bridges:
+       3 / 4 / 5 long, then the diagonal 2.5 / 3.0 / 3.5 of the same material). The record is
+       rewritten, the old actor deleted and the structure spawned again; the keeper follows. Only
+       spawned ones (in s_New), whose record the keeper protects from the editor's closing restore. */
+    static void DeleteActorsOfRecord(int idx);
+    bool ReshapeStructure(u8* body, bool rotate, bool resize) {
+        u8* recs = BuildingRecords();
+        int type = StructureOfBody(body);
+        u32 idx = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        if (!recs || !type || idx >= 47) return false;
+        int n = -1;
+        for (int i = 0; i < s_NewCount; i++) if (s_New[i].idx == (int)idx) n = i;
+        if (n < 0) { Log("structures: record %d is not one you spawned - not turned / resized", (int)idx); return false; }
+        u8 raw[0x14];
+        memcpy(raw, recs + idx * 0x14, 0x14);
+        u16* r = reinterpret_cast<u16*>(raw);
+        if (rotate) r[3] = (u16)((r[3] + 1) & 3);
+        if (resize) {
+            int m, k;
+            if (type != BridgeBuildingType || !BridgeLook(r[4], &m, &k)) { Log("structures: record %d has no other sizes", (int)idx); return false; }
+            r[4] = k_BridgeIds[m][(k + 1) % BridgeShapes];
+        }
+        DeleteActorsOfRecord((int)idx);
+        WriteRecord((int)idx, raw);
+        memcpy(s_New[n].raw, raw, 0x14);
+        SpawnRecordActor((int)idx);
+        s_ShapePending |= 1ull << idx;
+        Log("structures: record %d %s -> rotation %d id %x", (int)idx, rotate ? "turned" : "resized", r[3], r[4]);
+        return true;
+    }
+
     /* ---- Y removes a bridge / incline: its record is emptied, its actor deleted now, its walkable shape
        cleared once the editor has closed. The editor's closing restore brings the record (and the actor)
        back: KeepRemoved empties it again and deletes the actor of that record. ---- */
@@ -3043,6 +3109,41 @@ namespace sl {
         int ci = 0;
         while (*p && *p != ' ' && ci < 15) cmd[ci++] = *p++;
         DbgPrint("> %s", line);
+        if (strcmp(cmd, "find") == 0) {   /* find <hex bytes> [max hits]: every readable+writable region */
+            u8 pat[64];
+            int pn = 0;
+            p = SkipWs(p);
+            while (*p && *p != ' ' && pn < 64) {
+                auto hexv = [](char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; };
+                int hi = hexv(p[0]), lo = p[1] ? hexv(p[1]) : -1;
+                if (hi < 0 || lo < 0) break;
+                pat[pn++] = (u8)(hi * 16 + lo);
+                p += 2;
+            }
+            long maxHits = strtol(SkipWs(p), nullptr, 0);
+            if (maxHits <= 0) maxHits = 32;
+            if (pn < 2) { DbgPrint("! pattern too short"); return; }
+            int hits = 0;
+            u64 a = 0, scanned = 0;
+            while (a < 0x8000000000ull && hits < maxHits) {
+                MemoryInfo mi = {};
+                u32 pi = 0;
+                if (R_FAILED(svcQueryMemory(&mi, &pi, a)) || mi.addr + mi.size <= a) break;
+                if ((mi.perm & 3) == 3 && mi.type != 0 && mi.size < 0x100000000ull) {
+                    const u8* base = reinterpret_cast<const u8*>(mi.addr);
+                    for (u64 o = 0; o + pn <= mi.size && hits < maxHits; o += 2) {
+                        if (base[o] != pat[0] || memcmp(base + o, pat, pn) != 0) continue;
+                        if (base + o == pat) continue;
+                        DbgPrint("hit %lx (region %lx +%lx, type %x)", (unsigned long)(mi.addr + o), (unsigned long)mi.addr, (unsigned long)o, mi.type);
+                        hits++;
+                    }
+                    scanned += mi.size;
+                }
+                a = mi.addr + mi.size;
+            }
+            DbgPrint("%d hits, %lu MB scanned", hits, (unsigned long)(scanned >> 20));
+            return;
+        }
         if (strcmp(cmd, "unhold") == 0) { s_HoldCount.store(0); DbgPrint("holds cleared"); return; }
         if (strcmp(cmd, "diff") == 0) {
             if (!s_DbgSnapLen || !MemOk(s_DbgSnapAddr, s_DbgSnapLen, false)) { DbgPrint("! no snapshot"); return; }
@@ -3176,7 +3277,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-spawntest17 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-spawntest18 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
