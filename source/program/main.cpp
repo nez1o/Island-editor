@@ -2293,6 +2293,18 @@ namespace sl {
        it makes is ignored (HouseDesignSet), and the grid is refilled on the next frame
        (s_RefillMenu) so the tick moves to the new look outside the press handler. */
     static u8* s_RefillMenu = nullptr;
+    struct PendingSpawn { s32 tab; s32 cell; s64 at; bool on; };
+    static PendingSpawn s_PendingSpawn = {};
+    /* BridgeTick: the picked structure is placed when the editor is back in cursor mode (menu closed),
+       or after 8 s whatever happens. */
+    static void PendingSpawnTick() {
+        if (!s_PendingSpawn.on) return;
+        s64 now = NowTick();
+        bool cursor = s_CursorQueryTick && now - s_CursorQueryTick < MsTicks(100) && now - s_PendingSpawn.at > MsTicks(150);
+        if (!cursor && now - s_PendingSpawn.at < MsTicks(8000)) return;
+        s_PendingSpawn.on = false;
+        SpawnStructure(s_PendingSpawn.tab, s_PendingSpawn.cell);
+    }
 
     void HomeGridPick(u8* menu, u8* event) {
         s32 tab = menu ? *reinterpret_cast<s32*>(menu + MenuTabIndex) : -1;
@@ -2329,7 +2341,12 @@ namespace sl {
            while it opened; then picks were ignored. So a pick within 10 s of D-pad left, in a menu
            not opened on a bridge / incline, is a spawn too. */
         bool spawnPick = s_SpawnMode || (!MenuOnBridge() && SpawnWithin(0, 10000));
-        if (spawnPick) { Log("spawn menu: pick tab %d cell %d%s", tab, idx, s_SpawnMode ? "" : " (late menu)"); if (idx >= 0) SpawnStructure(tab, idx); return; }
+        if (spawnPick) {
+            Log("spawn menu: pick tab %d cell %d%s", tab, idx, s_SpawnMode ? "" : " (late menu)");
+            /* placed once the menu has closed (it used to appear behind the open menu) */
+            if (idx >= 0) { s_PendingSpawn = { tab, idx, NowTick(), true }; }
+            return;
+        }
         if (tab == BuildingsTab) { Log("buildings: open the menu with D-pad left to place one"); return; }
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
@@ -2593,16 +2610,17 @@ namespace sl {
     static NewStructure s_New[16];
     static int s_NewCount = 0;
 
-    static void SpawnRecordActor(int idx) {
+    static u32 SpawnRecordActor(int idx) {
         u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
         u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
         u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
         u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
-        if (!field || !list) { Log("spawn: no building list"); return; }
+        if (!field || !list) { Log("spawn: no building list"); return 0; }
         BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
         LogRecord("spawn: list record", record.raw);
         u32 h = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
         Log("spawn: record %d spawn requested, handle %x", idx, h);
+        return h;
     }
 
     static void WriteRecord(int idx, const u8* raw) {
@@ -2696,6 +2714,21 @@ namespace sl {
        rewritten, the old actor deleted and the structure spawned again; the keeper follows. Only
        spawned ones (in s_New), whose record the keeper protects from the editor's closing restore. */
     static void DeleteActorsOfRecord(int idx);
+    struct ReshapeSwap { bool active; u32 old[4]; int n; u32 newH; int frames; };
+    static ReshapeSwap s_Reshape = {};
+    static void FinishReshape() {
+        if (!s_Reshape.active) return;
+        using DelFn = void (*)(u8*);
+        for (int i = 0; i < s_Reshape.n; i++)
+            if (u8* a = ActorOfHandle(s_Reshape.old[i])) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+        s_Reshape.active = false;
+    }
+    static void ReshapeTick() {
+        if (!s_Reshape.active) return;
+        s_Reshape.frames++;
+        u8* nb = s_Reshape.newH ? ActorOfHandle(s_Reshape.newH) : nullptr;
+        if ((nb && s_Reshape.frames >= 3) || s_Reshape.frames >= 60) FinishReshape();
+    }
     bool ReshapeStructure(u8* body, bool rotate, bool resize) {
         u8* recs = BuildingRecords();
         int type = StructureOfBody(body);
@@ -2713,11 +2746,21 @@ namespace sl {
             if (type != BridgeBuildingType || !BridgeLook(r[4], &m, &k)) { Log("structures: record %d has no other sizes", (int)idx); return false; }
             r[4] = k_BridgeIds[m][(k + 1) % BridgeShapes];
         }
-        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);   /* (before its actor goes) */
-        DeleteActorsOfRecord((int)idx);
+        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        /* The new look is spawned first and the old actor deleted once the new one is there (a few
+           frames later, ReshapeTick): deleting first made the structure blink and its outline / the
+           Y prompt flicker (seen in a Switch video). */
+        FinishReshape();   /* a swap still running (fast presses): finish it now */
+        s_Reshape.n = 0;
+        ForEachActor([&](u8* a) {
+            if (s_Reshape.n < 4 && VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == idx && StructureOfBody(a))
+                s_Reshape.old[s_Reshape.n++] = *reinterpret_cast<u32*>(a + 0x230);
+        });
         WriteRecord((int)idx, raw);
         memcpy(s_New[n].raw, raw, 0x14);
-        SpawnRecordActor((int)idx);
+        s_Reshape.newH = SpawnRecordActor((int)idx);
+        s_Reshape.frames = 0;
+        s_Reshape.active = true;
         s_ShapePending |= 1ull << idx;
         Log("structures: record %d %s -> rotation %d id %x", (int)idx, rotate ? "turned" : "resized", r[3], r[4]);
         if (rotate) PlayEditFx(nullptr, "90度回転させる", at);
@@ -2949,6 +2992,8 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         RunPendingEmit();
+        ReshapeTick();
+        PendingSpawnTick();
         SnapBuildingsToGround();
         KeepRemoved();
         KeepNew();
@@ -3632,7 +3677,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx4 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx5 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
