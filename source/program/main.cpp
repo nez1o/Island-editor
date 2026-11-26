@@ -993,11 +993,25 @@ namespace sl {
 
     /* 0x68: drag to pos (+8 x, +0x10 z: footprint centre, already on the editor's grid). The house
        follows it in 5-unit cells, the unit of its save record. */
+    static void SquareDims(u8* body, int fk, float* hxOut, float* hzOut, float* oxOut, float* ozOut);
     static void BldDrag(BldComp* c, const u8* pos) {
         if (!c->grabbed || !pos) return;
         float x = *reinterpret_cast<const float*>(pos + 8), z = *reinterpret_cast<const float*>(pos + 0x10) + 5.0f;
         float tx = RoundToStep(x - c->startX, 5.0f);
         float tz = RoundToStep(z - c->startZ, 5.0f);
+        if (int k = StructureOfBody(c->body)) {
+            /* bridges / inclines move in whole tiles, lined up so their square (odd sizes sit on a tile
+               middle, even ones on a tile line) can centre on them: at half-tile spots it couldn't */
+            float hx, hz, ox, oz;
+            SquareDims(c->body, k == 26 ? 1 : 2, &hx, &hz, &ox, &oz);
+            auto snap = [](float start, float t, float o, float half) {
+                float rem = (((int)(half / 5.0f + 0.5f)) & 1) ? 5.0f : 0.0f;
+                float cpos = start + t + o - rem;
+                return RoundToStep(cpos, 10.0f) + rem - start - o;
+            };
+            tx = snap(c->startX, tx, ox, hx);
+            tz = snap(c->startZ, tz, oz, hz);
+        }
         if (tx == c->dx && tz == c->dz) return;
         ShiftParts(c, tx - c->dx, tz - c->dz);
         if (c == s_HeldComp) {   /* looks like it stays put, then glides over */
@@ -1428,18 +1442,9 @@ namespace sl {
         return recs && i < 47 ? reinterpret_cast<s16*>(recs + i * 0x14) : nullptr;
     }
     static bool BridgeLook(u16 id, int* mat, int* shape);
-    static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
-        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+    /* The square's half sizes and middle offset for a body, already turned by its record's rotation. */
+    static void SquareDims(u8* body, int fk, float* hxOut, float* hzOut, float* oxOut, float* ozOut) {
         int rot = 0, shape = 0;
-        {   /* which body / record the square is for, once per change (inclines didn't take their size) */
-            static u8* s_LastBody = nullptr;
-            if (body != s_LastBody) {
-                s_LastBody = body;
-                s16* rr = RecordOfBody(body);
-                Log("square: body %p rec %d type %d rot %d kind %d at %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
-                    rr ? rr[0] : -1, rr ? rr[3] : -1, fk, (int)p->x, (int)p->z);
-            }
-        }
         if (s16* r = RecordOfBody(body)) {
             rot = r[3] & 3;
             int m;
@@ -1456,6 +1461,21 @@ namespace sl {
         float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
         float ox = d.ox, oz = d.oz;
         for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
+        *hxOut = hx; *hzOut = hz; *oxOut = ox; *ozOut = oz;
+    }
+    static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
+        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        {   /* which body / record the square is for, once per change (inclines didn't take their size) */
+            static u8* s_LastBody = nullptr;
+            if (body != s_LastBody) {
+                s_LastBody = body;
+                s16* rr = RecordOfBody(body);
+                Log("square: body %p rec %d type %d rot %d kind %d at %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
+                    rr ? rr[0] : -1, rr ? rr[3] : -1, fk, (int)p->x, (int)p->z);
+            }
+        }
+        float hx, hz, ox, oz;
+        SquareDims(body, fk, &hx, &hz, &ox, &oz);
         /* The game's rect (0x2a85468): W = +0x5b8 + 1 tiles (with +0x5a8 = 0), D = +0x5bc + 1 tiles
            (with +0x5ac = 1), first tile = floor((pos - 5*W + 5) / 10), so its middle is a tile middle
            for odd sizes and a tile line for even ones: no offset can move it less than a tile. So the
@@ -3943,7 +3963,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn12 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn13 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
