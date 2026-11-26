@@ -1369,6 +1369,8 @@ namespace sl {
        over the rect the game made (cells of 5 units: +0x10 x0, +0x14 z0, +0x20 x1, +0x24 z1, inclusive).
        Half sizes / offsets in world units at rotation 0, tunable live (sl::s_Dim): [0] houses / shops,
        [1] bridges (half length = base + per-tile x length), [2] inclines, [3] diagonal bridges. */
+    struct FootTune { s32 tx, tz; float dx, dy, dz; };
+    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
     struct DimTune { float hx, hz, ox, oz, perTile; };
     DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 10, 12, 0, 0, 5 }, { 9, 28, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
     static s16* RecordOfBody(u8* body) {
@@ -1402,8 +1404,6 @@ namespace sl {
         }
         (void)minOut;   /* (left as the game made it: its layout isn't known) */
     }
-    struct FootTune { s32 tx, tz; float dx, dy, dz; };
-    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         s_CursorQueryTick = NowTick();
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
