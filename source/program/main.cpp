@@ -3191,8 +3191,24 @@ namespace sl {
                 if (R_FAILED(svcQueryMemory(&mi, &pi, a)) || mi.addr + mi.size <= a) break;
                 if ((mi.perm & 3) == 3 && mi.type != 0 && mi.size < 0x100000000ull) {
                     const u8* base = reinterpret_cast<const u8*>(mi.addr);
+                    /* The game keeps allocating / freeing while this runs (seen on a Switch: a region
+                       shrank mid-scan and the read faulted, crashing the game). Re-check each 4 KB page
+                       just before reading it, compare byte by byte (memcmp's wide loads can run past
+                       the end), and stop at the first page that isn't readable+writable any more. */
+                    u64 okTo = 0;
                     for (u64 o = 0; o + pn <= mi.size && hits < maxHits; o += 2) {
-                        if (base[o] != pat[0] || memcmp(base + o, pat, pn) != 0) continue;
+                        if (o + pn > okTo) {
+                            MemoryInfo pm = {};
+                            u32 ppi = 0;
+                            u64 at = mi.addr + ((o + pn - 1) & ~0xfffull);
+                            if (R_FAILED(svcQueryMemory(&pm, &ppi, at)) || (pm.perm & 3) != 3 || pm.type == 0) break;
+                            okTo = pm.addr + pm.size - mi.addr;
+                            if (okTo > ((o + pn - 1) & ~0xfffull) + 0x1000) okTo = ((o + pn - 1) & ~0xfffull) + 0x1000;
+                        }
+                        if (base[o] != pat[0]) continue;
+                        int k = 1;
+                        while (k < pn && base[o + k] == pat[k]) k++;
+                        if (k != pn) continue;
                         if (base + o == pat) continue;
                         DbgPrint("hit %lx (region %lx +%lx, type %x)", (unsigned long)(mi.addr + o), (unsigned long)mi.addr, (unsigned long)o, mi.type);
                         hits++;
@@ -3337,7 +3353,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-spawntest22 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.64-spawntest23 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
