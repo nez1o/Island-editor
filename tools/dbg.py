@@ -81,6 +81,9 @@ if os.environ.get('SWITCH_FTP'):
             ftp = connect(); continue
         if any(n.rstrip('/').endswith('cmd.txt') for n in names): continue
         out = fetch(ftp, 'dbg_out.txt')
+        if out is not None and out.startswith('> ' + nonce) and len(out) >= 32767:   # the module's 32 KB buffer
+            print(out.split('\n', 2)[2], end='')
+            sys.exit('\n! answer cut at 32 KB - ask for less per call')
         if out is not None and out.startswith('> ' + nonce) and out.rstrip().endswith('# done'):
             print(out.split('\n', 2)[2], end='')   # without the nonce lines
             sys.exit(0)

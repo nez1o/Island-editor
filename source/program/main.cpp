@@ -2804,12 +2804,39 @@ namespace sl {
         return true;
     }
 
+    /* Recording of XLink keyword searches and emits (dbg "xlog"), to find which XLink object plays
+       which keyword (the editor cursor's, for the effects / sounds above). */
+    struct XSearchRec { uintptr_t ctx; char name[48]; };
+    struct XEmitRec { uintptr_t obj, ctx, asset; };
+    static XSearchRec s_XSearch[256];
+    static XEmitRec s_XEmit[256];
+    static std::atomic<u32> s_XSearchN{0}, s_XEmitN{0};
+    static std::atomic<int> s_XRecord{0};
+    static uintptr_t XCtxOf(u8* obj) {
+        if (!obj) return 0;
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        return a30 ? *reinterpret_cast<uintptr_t*>(a30 + 0x18) : 0;
+    }
+    void XRecSearch(void* ctx, const char* name) {
+        if (!s_XRecord.load(std::memory_order_relaxed) || !name) return;
+        u32 i = s_XSearchN.fetch_add(1) & 255;
+        s_XSearch[i].ctx = (uintptr_t)ctx;
+        strncpy(s_XSearch[i].name, name, sizeof(s_XSearch[i].name) - 1);
+        s_XSearch[i].name[sizeof(s_XSearch[i].name) - 1] = 0;
+    }
+    void XRecEmit(u8* obj, void* q) {
+        if (!s_XRecord.load(std::memory_order_relaxed) || !obj) return;
+        u32 i = s_XEmitN.fetch_add(1) & 255;
+        s_XEmit[i] = { (uintptr_t)obj, XCtxOf(obj), q ? *reinterpret_cast<uintptr_t*>(reinterpret_cast<u8*>(q) + 8) : 0 };
+    }
+
     /* dbg "emit <obj> <keyword>": run on the game thread (BridgeTick). */
     static std::atomic<int> s_EmitPending{0};
     static uintptr_t s_EmitObj = 0;
     static char s_EmitName[96];
     static void RunPendingEmit() {
         if (!s_EmitPending.load(std::memory_order_acquire)) return;
+        s_XRecord.store(0);   /* (our own emit isn't recorded) */
         bool ok = XLinkEmit(reinterpret_cast<u8*>(s_EmitObj), s_EmitName);
         Log("xlink: emit '%s' on %lx -> %s", s_EmitName, (unsigned long)s_EmitObj, ok ? "found + emitted" : "keyword not found");
         s_EmitPending.store(0, std::memory_order_release);
@@ -3377,6 +3404,25 @@ namespace sl {
             return;
         }
         if (strcmp(cmd, "unhold") == 0) { s_HoldCount.store(0); DbgPrint("holds cleared"); return; }
+        if (strcmp(cmd, "xrec") == 0) {   /* xrec: clear and start recording XLink searches / emits */
+            s_XSearchN.store(0); s_XEmitN.store(0); s_XRecord.store(1); DbgPrint("recording"); return;
+        }
+        if (strcmp(cmd, "xlog") == 0) {   /* xlog: stop recording, list what was recorded (non-ASCII names, i.e. keywords) */
+            s_XRecord.store(0);
+            u32 ns = s_XSearchN.load(), ne = s_XEmitN.load();
+            DbgPrint("%u searches, %u emits", ns, ne);
+            int shown = 0;
+            for (u32 k = (ns > 256 ? ns - 256 : 0); k < ns && shown < 120; k++) {
+                const XSearchRec& r = s_XSearch[k & 255];
+                bool kw = false;
+                for (const char* c = r.name; *c; c++) if ((u8)*c >= 0x80) kw = true;
+                if (!kw) continue;
+                DbgPrint("S ctx %lx %s", (unsigned long)r.ctx, r.name); shown++;
+            }
+            for (u32 k = (ne > 256 ? ne - 256 : 0); k < ne && shown < 240; k++, shown++)
+                DbgPrint("E obj %lx ctx %lx asset %lx", (unsigned long)s_XEmit[k & 255].obj, (unsigned long)s_XEmit[k & 255].ctx, (unsigned long)s_XEmit[k & 255].asset);
+            return;
+        }
         if (strcmp(cmd, "diff") == 0) {
             if (!s_DbgSnapLen || !MemOk(s_DbgSnapAddr, s_DbgSnapLen, false)) { DbgPrint("! no snapshot"); return; }
             const u8* now = reinterpret_cast<const u8*>(s_DbgSnapAddr);
@@ -3522,7 +3568,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx1 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx2 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -3870,6 +3916,21 @@ HOOK_DEFINE_TRAMPOLINE(EditCursorCentre) {
 /* "Can the held item go here?" (x0 = drag holder; +0x88 set = cache the answer at +0x78).
    0x13f20f8 puts the item at the target when this says yes, else back where it came from.
    On the main island the answer is always yes (the game's own check still runs first). */
+/* XLink keyword search (ctx, name) -> asset and emit (obj, {vt, asset, flag}, handle*): recorded for
+   dbg "xrec" / "xlog". */
+HOOK_DEFINE_TRAMPOLINE(XLinkSearch) {
+    static void* Callback(void* ctx, const char* name) {
+        sl::XRecSearch(ctx, name);
+        return Orig(ctx, name);
+    }
+};
+HOOK_DEFINE_TRAMPOLINE(XLinkEmitHook) {
+    static u64 Callback(u8* obj, void* q, void* out) {
+        sl::XRecEmit(obj, q);
+        return Orig(obj, q, out);
+    }
+};
+
 /* Editor's garden-edit-area effect update (x0 = area effect, x1 = the cursor's XLink owner). */
 HOOK_DEFINE_TRAMPOLINE(EditAreaFx) {
     static void Callback(u8* area, u8* owner) {
@@ -4335,6 +4396,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     StateChangeHook::InstallAtOffset(0x3dbb160);
     EditCanPlace::InstallAtOffset(0x13ea4c0);
     EditAreaFx::InstallAtOffset(0x13b9f78);
+    XLinkSearch::InstallAtOffset(0x3af5ec0);
+    XLinkEmitHook::InstallAtOffset(0x3af47b0);
     BuildingHoverGate::InstallAtOffset(0x13cfd7c);
     BuildingAtCell::InstallAtOffset(0x13d0308);
     BuildingHover::InstallAtOffset(0x13f1bc4);
