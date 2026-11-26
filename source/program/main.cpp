@@ -1370,7 +1370,7 @@ namespace sl {
        Half sizes / offsets in world units at rotation 0, tunable live (sl::s_Dim): [0] houses / shops,
        [1] bridges (half length = base + per-tile x length), [2] inclines, [3] diagonal bridges. */
     struct DimTune { float hx, hz, ox, oz, perTile; };
-    DimTune s_Dim[4] = { { 25, 20, 0, -15, 0 }, { 10, 15, 0, 0, 5 }, { 15, 20, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 10, 12, 0, 0, 5 }, { 9, 28, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
     static s16* RecordOfBody(u8* body) {
         u8* recs = BuildingRecords();
         u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
@@ -1391,7 +1391,9 @@ namespace sl {
         float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
         float ox = d.ox, oz = d.oz;
         for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
-        float cx = p->x + ox, cz = p->z + oz;
+        /* plus a world offset (not turned): every square sat about half a cell toward +x / +z,
+           whichever way the structure faced (Switch screenshots) */
+        float cx = p->x + ox + s_Foot[fk].dx, cz = p->z + oz + s_Foot[fk].dz;
         auto cell = [](float v) { return (s32)__builtin_floorf(v / 5.0f); };
         s32 x0 = cell(cx - hx), z0 = cell(cz - hz), x1 = cell(cx + hx - 0.01f), z1 = cell(cz + hz - 0.01f);
         if (out) {
@@ -1401,7 +1403,7 @@ namespace sl {
         (void)minOut;   /* (left as the game made it: its layout isn't known) */
     }
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
-    FootTune s_Foot[3] = { { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
+    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         s_CursorQueryTick = NowTick();
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
@@ -1443,7 +1445,7 @@ namespace sl {
         *reinterpret_cast<s32*>(c->owner + 0x5b8) = borrowed ? 0 : s_Foot[fk].tx;
         *reinterpret_cast<s32*>(c->owner + 0x5bc) = borrowed ? 0 : s_Foot[fk].tz;
         Vec3f fp = *BldPos(c);
-        if (!borrowed) { fp.x += s_Foot[fk].dx; fp.y += s_Foot[fk].dy; fp.z += s_Foot[fk].dz; }
+        if (!borrowed) fp.y += s_Foot[fk].dy;
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
             *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
@@ -3816,7 +3818,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn4 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn5 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
