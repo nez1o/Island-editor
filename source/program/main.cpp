@@ -1364,6 +1364,42 @@ namespace sl {
         }
     }
 
+    /* The highlight square from the structure itself (sai: "match automatically"): centre = the body
+       plus an offset, size per kind (bridges by their length), turned by the record's rotation, written
+       over the rect the game made (cells of 5 units: +0x10 x0, +0x14 z0, +0x20 x1, +0x24 z1, inclusive).
+       Half sizes / offsets in world units at rotation 0, tunable live (sl::s_Dim): [0] houses / shops,
+       [1] bridges (half length = base + per-tile x length), [2] inclines, [3] diagonal bridges. */
+    struct DimTune { float hx, hz, ox, oz, perTile; };
+    DimTune s_Dim[4] = { { 25, 20, 0, -15, 0 }, { 10, 15, 0, 0, 5 }, { 15, 20, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    static s16* RecordOfBody(u8* body) {
+        u8* recs = BuildingRecords();
+        u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        return recs && i < 47 ? reinterpret_cast<s16*>(recs + i * 0x14) : nullptr;
+    }
+    static bool BridgeLook(u16 id, int* mat, int* shape);
+    static void FitRect(u8* body, int fk, u8* out, u8* minOut) {
+        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        int rot = 0, shape = 0;
+        if (s16* r = RecordOfBody(body)) {
+            rot = r[3] & 3;
+            int m;
+            if (fk == 1 && !BridgeLook((u16)r[4], &m, &shape)) shape = 0;
+        }
+        int dk = fk == 1 && shape >= 3 ? 3 : fk;
+        const DimTune& d = s_Dim[dk];
+        float len = (float)((shape % 3) + 3);            /* bridges: 3 / 4 / 5 tiles */
+        float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
+        float ox = d.ox, oz = d.oz;
+        for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
+        float cx = p->x + ox, cz = p->z + oz;
+        auto cell = [](float v) { return (s32)__builtin_floorf(v / 5.0f); };
+        s32 x0 = cell(cx - hx), z0 = cell(cz - hz), x1 = cell(cx + hx - 0.01f), z1 = cell(cz + hz - 0.01f);
+        if (out) {
+            *reinterpret_cast<s32*>(out + 0x10) = x0; *reinterpret_cast<s32*>(out + 0x14) = z0;
+            *reinterpret_cast<s32*>(out + 0x20) = x1; *reinterpret_cast<s32*>(out + 0x24) = z1;
+        }
+        (void)minOut;   /* (left as the game made it: its layout isn't known) */
+    }
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
     FootTune s_Foot[3] = { { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
@@ -1414,6 +1450,7 @@ namespace sl {
         using RectFn = void (*)(BldComp*, u8*, void*);
         if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
         if (minOut) reinterpret_cast<RectFn>(Main(BldRectMin))(c, minOut, &at);
+        if (!borrowed) FitRect(body, fk, out, minOut);
         return *reinterpret_cast<u32*>(body + 0x230);
     }
 
@@ -3779,7 +3816,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn3 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn4 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
