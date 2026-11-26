@@ -917,6 +917,32 @@ namespace sl {
     /* 0x20: footprint centre the way HHP reports it (z 5 in front of the body). */
     bool SpawnPosFor(const u8* body, Vec3f* out);   /* spawn menu: the borrowed house stands at the cursor */
 
+    /* Held like furniture: while a building / bridge is held it bobs gently and glides to each new
+       cell instead of jumping (a visual offset on top of the real position, undone before anything
+       reads or changes it for real). */
+    static BldComp* s_HeldComp = nullptr;
+    static Vec3f s_HeldV = {};          /* offset applied to the parts right now */
+    static float s_GlideX = 0, s_GlideZ = 0;
+    static int s_HeldT = 0;
+    static void HeldUndo(BldComp* c) {
+        if (c != s_HeldComp) return;
+        ShiftParts(c, -s_HeldV.x, -s_HeldV.z, -s_HeldV.y);
+        s_HeldV = {};
+    }
+    static void HeldTick() {
+        BldComp* c = s_HeldComp;
+        if (!c) return;
+        if (!c->grabbed || !c->body) { s_HeldComp = nullptr; s_HeldV = {}; return; }
+        s_HeldT++;
+        s_GlideX *= 0.65f; s_GlideZ *= 0.65f;
+        if (s_GlideX > -0.05f && s_GlideX < 0.05f) s_GlideX = 0;
+        if (s_GlideZ > -0.05f && s_GlideZ < 0.05f) s_GlideZ = 0;
+        float bob = 0.8f * __builtin_sinf(s_HeldT * 0.10f);
+        Vec3f v = { s_GlideX, bob, s_GlideZ };
+        ShiftParts(c, v.x - s_HeldV.x, v.z - s_HeldV.z, v.y - s_HeldV.y);
+        s_HeldV = v;
+    }
+
     static Vec3f* BldPos(BldComp* c) {
         Vec3f sp;
         if (SpawnPosFor(c->body, &sp)) {
@@ -926,7 +952,8 @@ namespace sl {
             return &c->pos;
         }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
-        c->pos = { p->x, p->y - (c->grabbed ? BldLift : 0.0f), p->z - 5.0f };
+        Vec3f hv = c == s_HeldComp ? s_HeldV : Vec3f{};
+        c->pos = { p->x - hv.x, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z - 5.0f };
         return &c->pos;
     }
 
@@ -951,6 +978,7 @@ namespace sl {
         c->startX = bx; c->startZ = bz; c->dx = c->dz = 0;
         c->grabbed = 1;
         ShiftParts(c, 0, 0, BldLift);
+        s_HeldComp = c; s_HeldV = {}; s_GlideX = s_GlideZ = 0; s_HeldT = 0;
         BuildingSlot(c, false);
         Log("buildings: grabbed building at (%d, %d), %d parts", (int)bx, (int)bz, c->parts);
         PlayEditFx(nullptr, "家具をつかむ", Vec3f{ bx, b->y, bz });   /* like grabbing furniture */
@@ -972,6 +1000,11 @@ namespace sl {
         float tz = RoundToStep(z - c->startZ, 5.0f);
         if (tx == c->dx && tz == c->dz) return;
         ShiftParts(c, tx - c->dx, tz - c->dz);
+        if (c == s_HeldComp) {   /* looks like it stays put, then glides over */
+            s_GlideX -= tx - c->dx; s_GlideZ -= tz - c->dz;
+            ShiftParts(c, -(tx - c->dx), -(tz - c->dz));
+            s_HeldV.x -= tx - c->dx; s_HeldV.z -= tz - c->dz;
+        }
         c->dx = tx; c->dz = tz;
     }
 
@@ -1000,6 +1033,7 @@ namespace sl {
     static void BldDrop(BldComp* c, const u8* pos) {
         if (!c->grabbed) return;
         BldDrag(c, pos);
+        HeldUndo(c); s_HeldComp = nullptr;
         c->grabbed = 0;
         ShiftParts(c, 0, 0, -BldLift);
         if (c->dx != 0 || c->dz != 0)
@@ -1015,6 +1049,7 @@ namespace sl {
     /* 0x60: put back. */
     static void BldCancel(BldComp* c) {
         if (!c->grabbed) return;
+        HeldUndo(c); s_HeldComp = nullptr;
         ShiftParts(c, -c->dx, -c->dz, -BldLift);
         c->dx = c->dz = 0;
         c->grabbed = 0;
@@ -1370,9 +1405,9 @@ namespace sl {
        Half sizes / offsets in world units at rotation 0, tunable live (sl::s_Dim): [0] houses / shops,
        [1] bridges (half length = base + per-tile x length), [2] inclines, [3] diagonal bridges. */
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
-    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
+    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
     struct DimTune { float hx, hz, ox, oz, perTile; };
-    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 24, 9, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 20, 20, 0, -5, 0 }, { 10, 10, 0, 0, 5 } };
     /* Houses / shops: one size per record type (sai's player house and a villager house differ):
        half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
        index = record type, 4 floats each). 0 = use s_Dim[0]. */
@@ -1993,6 +2028,7 @@ namespace sl {
     }
 
     void BuildingTick() {
+        HeldTick();
         BounceTick();
         CliffStackTick();
         UnlockTick();
@@ -3855,7 +3891,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn8 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn9 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
