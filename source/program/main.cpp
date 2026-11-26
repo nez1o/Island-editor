@@ -2306,7 +2306,12 @@ namespace sl {
         if (idx < 0 || idx >= *reinterpret_cast<s32*>(list + 0x3cc)) idx = -1;
         Log("bridges: cell %d picked (slot %d)", idx, slot);
         int want = tab == BridgeTab ? BridgeBuildingType : InclineBuildingType;
-        if (s_SpawnMode) { Log("spawn menu: pick tab %d cell %d", tab, idx); if (idx >= 0) SpawnStructure(tab, idx); return; }
+        /* A spawn: the menu came from D-pad left. On a Switch the menu sometimes took longer to open
+           than the spawn timing allows ("did not open"), or the cursor heartbeat ended spawn mode
+           while it opened; then picks were ignored. So a pick within 10 s of D-pad left, in a menu
+           not opened on a bridge / incline, is a spawn too. */
+        bool spawnPick = s_SpawnMode || (!MenuOnBridge() && SpawnWithin(0, 10000));
+        if (spawnPick) { Log("spawn menu: pick tab %d cell %d%s", tab, idx, s_SpawnMode ? "" : " (late menu)"); if (idx >= 0) SpawnStructure(tab, idx); return; }
         if (tab == BuildingsTab) { Log("buildings: open the menu with D-pad left to place one"); return; }
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
@@ -2737,10 +2742,11 @@ namespace sl {
         memcpy(r.raw, recs + idx * 0x14, 0x14);
         for (int i = 0; i < s_NewCount; i++) if (s_New[i].idx == (int)idx) s_New[i--] = s_New[--s_NewCount];
         for (int i = 0; i < s_OverrideCount; i++) if (s_Overrides[i].idx == (int)idx) s_Overrides[i--] = s_Overrides[--s_OverrideCount];
+        /* every actor of this record, not just the one under the cursor: a building that was just
+           moved still has its old actor for a moment, which stayed visible and needed more presses */
+        DeleteActorsOfRecord((int)idx);   /* (includes <body>; deleting one twice isn't safe) */
         u8 zero[0x14] = {};
         WriteRecord((int)idx, zero);
-        using DelFn = void (*)(u8*);
-        reinterpret_cast<DelFn>(Main(ActorRequestDelete))(body);
         s_ShapePending |= 1ull << idx;
         s_RemovePending |= 1ull << idx;
         Log("spawn: removed %s record %d (id %x)", type == BridgeBuildingType ? "bridge" : type == InclineBuildingType ? "incline" : "building", (int)idx,
@@ -3420,7 +3426,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.65-buildings1 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.65-buildings2 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
