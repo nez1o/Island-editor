@@ -2343,8 +2343,7 @@ namespace sl {
         bool spawnPick = s_SpawnMode || (!MenuOnBridge() && SpawnWithin(0, 10000));
         if (spawnPick) {
             Log("spawn menu: pick tab %d cell %d%s", tab, idx, s_SpawnMode ? "" : " (late menu)");
-            /* placed once the menu has closed (it used to appear behind the open menu) */
-            if (idx >= 0) { s_PendingSpawn = { tab, idx, NowTick(), true }; }
+            if (idx >= 0) SpawnStructure(tab, idx);   /* right away, while the menu is open (sai prefers it) */
             return;
         }
         if (tab == BuildingsTab) { Log("buildings: open the menu with D-pad left to place one"); return; }
@@ -2842,7 +2841,7 @@ namespace sl {
     void CaptureEditXLink(u8* area, u8* owner) { s_XArea = area; s_XOwner = owner; }
 
     static bool MemOk(uintptr_t a, size_t len, bool write);
-    static bool XLinkEmit(u8* obj, const char* name, const Vec3f* at = nullptr) {
+    static bool XLinkEmit(u8* obj, const char* name, const Vec3f* at = nullptr, float scale = 1.0f) {
         if (!obj || !name) return false;
         u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
         void* ctx = a30 ? *reinterpret_cast<void**>(a30 + 0x18) : nullptr;
@@ -2860,9 +2859,9 @@ namespace sl {
             *reinterpret_cast<float*>(ev + 0xa8) = at->x;
             *reinterpret_cast<float*>(ev + 0xac) = at->y;
             *reinterpret_cast<float*>(ev + 0xb0) = at->z;
-            *reinterpret_cast<float*>(ev + 0xb4) = 1.0f;
-            *reinterpret_cast<float*>(ev + 0xb8) = 1.0f;
-            *reinterpret_cast<float*>(ev + 0xbc) = 1.0f;
+            *reinterpret_cast<float*>(ev + 0xb4) = scale;
+            *reinterpret_cast<float*>(ev + 0xb8) = scale;
+            *reinterpret_cast<float*>(ev + 0xbc) = scale;
             *reinterpret_cast<u32*>(ev + 0x184) |= 4;
         }
         return true;
@@ -2943,9 +2942,16 @@ namespace sl {
 
     /* The editor's own effects / sounds for our actions (names from the FtrEditCursor users, auditioned
        on a Switch: the sound plays; effects need a position). */
+    /* Effects 2.5x the path tool's size (sai: "make the clouds bigger"). Sounds get no position:
+       the effect event's layout (+0xa8 position...) isn't a sound event's, and with it most sounds
+       didn't play (sai: "barely no sounds"); the dbg test without a position played fine. */
     static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at) {
-        if (effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, effect, &at); }
-        if (sound) { if (u8* so = XObjOfCtx(s_EditSCtx)) XLinkEmit(so, sound, &at); }
+        if (effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, effect, &at, 2.5f); }
+        if (sound) {
+            u8* so = XObjOfCtx(s_EditSCtx);
+            if (so) XLinkEmit(so, sound);
+            else Log("xlink: no sound player yet (hover something in the editor once)");
+        }
     }
 
     /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
@@ -3677,7 +3683,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx5 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx6 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
