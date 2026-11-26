@@ -2725,8 +2725,9 @@ namespace sl {
     static void ReshapeTick() {
         if (!s_Reshape.active) return;
         s_Reshape.frames++;
-        u8* nb = s_Reshape.newH ? ActorOfHandle(s_Reshape.newH) : nullptr;
-        if ((nb && s_Reshape.frames >= 3) || s_Reshape.frames >= 60) FinishReshape();
+        /* 2 frames: the new one is drawn by then. Waiting for its actor by handle didn't work (the
+           lookup stayed empty), so both showed stacked for ~2 s (Switch video). */
+        if (s_Reshape.frames >= 2) FinishReshape();
     }
     bool ReshapeStructure(u8* body, bool rotate, bool resize) {
         u8* recs = BuildingRecords();
@@ -3683,7 +3684,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx6 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx7 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
