@@ -2990,7 +2990,7 @@ namespace sl {
     struct Shrinking { u32 h; int f; float y; };
     static Shrinking s_Shrink[8];
     static int s_ShrinkCount = 0;
-    constexpr int ShrinkFrames = 12;
+    constexpr int ShrinkFrames = 8;   /* 12 was a bit slow (sai) */
     static void ShrinkActorsOfRecord(int idx) {
         using DelFn = void (*)(u8*);
         ForEachActor([&](u8* a) {
@@ -3943,7 +3943,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn11 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn12 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
