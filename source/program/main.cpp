@@ -1454,7 +1454,7 @@ namespace sl {
         { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
         { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
         { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
-        { 34, 29, 0, -5 }, { 29.5f, 28, 0, -5 }, { 36, 29, 0, -5 }, {}, {}, { 24, 24, 0, -5 },
+        { 34, 29, 0, -5 }, { 29.5f, 28, 0, -5 }, { 36, 29, 0, -5 }, {}, {}, { 24, 24, 0, 5 },   /* Able Sisters: a tile further forward (live on a Switch) */
         { 21, 25, 0, -5 } };
     static s16* RecordOfBody(u8* body) {
         u8* recs = BuildingRecords();
@@ -4065,7 +4065,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn22 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn23 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
