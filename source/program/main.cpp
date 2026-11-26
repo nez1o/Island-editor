@@ -1377,7 +1377,16 @@ namespace sl {
        half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
        index = record type, 4 floats each). 0 = use s_Dim[0]. */
     struct TypeDim { float hx, hz, ox, oz; };
-    TypeDim s_TypeDim[48] = {};
+    /* measured from sai's straight-down screenshots (2026-11-26): player houses, villager houses,
+       Nook's Cranny 19, Resident Services 20, Museum 21, Able Sisters 24, campsite 25 */
+    TypeDim s_TypeDim[48] = {
+        {}, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f },
+        { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f },
+        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
+        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
+        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
+        { 34, 29, 0.7f, -18.7f }, { 29.5f, 28, -1.8f, -29.8f }, { 36, 29, 0, -22 }, {}, {}, { 24, 24, 3, -26.5f },
+        { 21, 25, -0.7f, -20.4f } };
     static s16* RecordOfBody(u8* body) {
         u8* recs = BuildingRecords();
         u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
@@ -1387,11 +1396,21 @@ namespace sl {
     static void FitRect(u8* body, int fk, u8* out, u8* minOut) {
         const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
         int rot = 0, shape = 0;
+        {   /* which body / record the square is for, once per change (inclines didn't take their size) */
+            static u8* s_LastBody = nullptr;
+            if (body != s_LastBody) {
+                s_LastBody = body;
+                s16* rr = RecordOfBody(body);
+                Log("square: body %p rec %d type %d rot %d kind %d at %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
+                    rr ? rr[0] : -1, rr ? rr[3] : -1, fk, (int)p->x, (int)p->z);
+            }
+        }
         if (s16* r = RecordOfBody(body)) {
             rot = r[3] & 3;
             int m;
             if (fk == 1 && !BridgeLook((u16)r[4], &m, &shape)) shape = 0;
         }
+        if (fk == 0) if (s16* r = RecordOfBody(body)) { if (r[0] == 26) fk = 1; else if (r[0] == 27) fk = 2; }
         int dk = fk == 1 && shape >= 3 ? 3 : fk;
         DimTune d = s_Dim[dk];
         if (fk == 0) if (s16* r = RecordOfBody(body)) if (r[0] > 0 && r[0] < 48 && s_TypeDim[r[0]].hx > 0) {
@@ -3827,7 +3846,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn6 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn7 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
