@@ -2815,6 +2815,13 @@ namespace sl {
                 if (type == 0 && (s_RemovePending >> i & 1)) {
                     reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
                     Log("spawn: walk shape of removed record %d cleared", i);
+                } else if (type > 0) {
+                    /* a house / shop placed from the Buildings tab: walls (the house builder) - it was
+                       walk-through until the island was reloaded */
+                    reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
+                    u64 ret = reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(
+                        field + BldSlotOffset, (u32)i, h, 0, 0, 0, 0, 0);
+                    Log("buildings: walls of record %d (type %d) built (ret %d)", i, type, (int)(ret & 1));
                 }
                 continue;
             }
@@ -4068,7 +4075,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn25 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn26 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
