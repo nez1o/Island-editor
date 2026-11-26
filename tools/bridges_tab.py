@@ -2,7 +2,7 @@
 # Island Editor opens with X on a house). Called by build_romfs.py; builds from the player's own
 # dump, so no game files go into the repository.
 #
-# Two extra tabs after the game's five (NEW_TABS): Bridges (5) and Inclines (6).
+# Three extra tabs after the game's five (NEW_TABS): Bridges (5), Inclines (6) and Buildings (7).
 #   Layout/WherearenIslandsCustomHome     tab buttons L_Category_05 / 06 (copies of the one before,
 #                                         one tab step to the right) and frames 5 / 6 of the
 #                                         CategoryNum animation (layout for f + 1 tabs at frame f)
@@ -15,7 +15,7 @@ import zstandard
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import bflan, bntx_write, bc4, swz, bridge_icons, astc, render_icons
+import bflan, bntx_write, bc4, swz, bridge_icons, building_icons, astc, render_icons
 
 TAB_STEP = 98.0                 # layout units between tab buttons (L_Category_0n x = 97 + 98 n)
 # The extra tabs, after the game's five: (tab index, STR_CategoryName label (unused; the game's are
@@ -23,6 +23,7 @@ TAB_STEP = 98.0                 # layout units between tab buttons (L_Category_0
 NEW_TABS = [
     (5, '1290', 'Bridges', 'IconCatBridge^s', bridge_icons.tab_icon),
     (6, '1291', 'Inclines', 'IconCatSlope^s', bridge_icons.incline_tab_icon),
+    (7, '1292', 'Buildings', 'IconCatBuilding^s', building_icons.tab_icon),
 ]
 
 
@@ -49,11 +50,14 @@ def add_tab_panes(body):
     return set_strip_static(body)
 
 
-# The tab strip's panes as laid out for 7 tabs (CategoryNum's last frame). The menu doesn't play
-# that animation on the main island, so the layout's own values (the 5-tab layout) are what shows.
-STRIP_7 = {'N_Cat_00': ('x', 49.0), 'N_L_00': ('x', -49.0), 'N_R_00': ('x', 49.0),
-           'N_L_03': ('x', -489.0), 'N_R_03': ('x', -391.0), 'N_L_04': ('x', -489.0), 'N_R_04': ('x', -391.0),
-           'W_CategoryBase_00': ('w', 726.0)}
+# The tab strip's panes as laid out for all the tabs (CategoryNum's last frame). The menu doesn't play
+# that animation on the main island, so the layout's own values are what shows. The game's file has
+# the 5-tab layout; each extra tab moves these by one step (from the CategoryNum keys).
+TAB_TOTAL = 5 + len(NEW_TABS)
+STRIP_5 = {'N_Cat_00': ('x', 147.0, -49.0), 'N_L_00': ('x', 49.0, -49.0), 'N_R_00': ('x', -49.0, 49.0),
+           'N_L_03': ('x', -391.0, -49.0), 'N_R_03': ('x', -489.0, 49.0), 'N_L_04': ('x', -391.0, -49.0),
+           'N_R_04': ('x', -489.0, 49.0), 'W_CategoryBase_00': ('w', 530.0, 98.0)}
+STRIP_ALL = {k: (what, v + step * (TAB_TOTAL - 5)) for k, (what, v, step) in STRIP_5.items()}
 
 
 def set_strip_static(body):
@@ -62,11 +66,11 @@ def set_strip_static(body):
     for t, p, sz in flyt_sections(body):
         if t not in (b'pan1', b'wnd1', b'pic1', b'prt1'): continue
         name = bytes(body[p + 0xc:p + 0x24]).split(b'\0')[0].decode()
-        if name not in STRIP_7: continue
-        what, v = STRIP_7[name]
+        if name not in STRIP_ALL: continue
+        what, v = STRIP_ALL[name]
         struct.pack_into('<f', body, p + (0x2c if what == 'x' else 0x4c), v)
         seen.add(name)
-    assert seen == set(STRIP_7), set(STRIP_7) - seen
+    assert seen == set(STRIP_ALL), set(STRIP_ALL) - seen
     return bytes(body)
 
 
@@ -198,10 +202,11 @@ DECKS = {
 
 
 def icon_names():
-    return [('B%d' % i, a, m) for i, (a, m) in enumerate(BRIDGE_ICONS)] + [('S%d' % i, a, m) for i, (a, m) in enumerate(INCLINE_ICONS)]
+    return ([('B%d' % i, a, m) for i, (a, m) in enumerate(BRIDGE_ICONS)] + [('S%d' % i, a, m) for i, (a, m) in enumerate(INCLINE_ICONS)]
+            + [('H%d' % i, None, i) for i in range(len(building_icons.NAMES))])   # Buildings: pixel art
 
 
-def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None, pictures=None):
+def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None, pictures=None, only=None):
     """pictures: a folder of 300x300 PNGs named B0..B7 / S0..S7 to use instead of renders (env
     BRIDGE_PICTURES for build_romfs.py); kept outside the repository."""
     """Writes Model/Layout_HouseShapeIcon_<B0..B7, S0..S7>; returns {rstb path: size} (new entries)."""
@@ -216,8 +221,11 @@ def build_icons(romfs, out, sarc_files, sarc_rebuild, preview_dir=None, pictures
     cache = {}
     sizes = {}
     for name, arch, model in icon_names():
+        if only and name[0] not in only: continue
         pic = os.path.join(pictures, name + '.png') if pictures else None
-        if pic and os.path.exists(pic):     # a 300x300 picture supplied by the player (the shop's own previews)
+        if arch is None:                     # Buildings tab: pixel art (building_icons.py)
+            img = building_icons.picture(model)
+        elif pic and os.path.exists(pic):   # a 300x300 picture supplied by the player (the shop's own previews)
             import png
             pw, ph, img = png.read(pic)
             assert (pw, ph) == (300, 300), pic
@@ -301,6 +309,11 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
                         label = '%05d' % (base + i)
                         assert not any(e[0] == label for e in entries)
                         entries.append([label, kit[1], kit[2]])
+                attr = kit_names[CELL_NAMES_BRIDGE[0]][1]               # the Buildings tab: our own names
+                for i, text in enumerate(building_icons.NAMES):
+                    label = '%05d' % (60020 + i)
+                    assert not any(e[0] == label for e in entries)
+                    entries.append([label, attr, text.encode('utf-16le') + b'\0\0'])
                 f[1] = msbt_write(header, ngroups, asize, entries)
                 continue
             if f[0] != 'STR_CategoryName.msbt': continue
@@ -313,5 +326,6 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
         blob = sarc_write(mult, [tuple(f) for f in files])
         zs_write(os.path.join(out, 'Message', 'String_%s.sarc.zs' % lang), blob)
         sizes['Message/String_%s.sarc' % lang] = len(blob)
-    sizes.update(build_icons(romfs, out, sarc_files, sarc_rebuild, pictures=os.environ.get('BRIDGE_PICTURES')))
+    sizes.update(build_icons(romfs, out, sarc_files, sarc_rebuild, pictures=os.environ.get('BRIDGE_PICTURES'),
+                             only=os.environ.get('TAB_ICONS_ONLY')))   # e.g. "H": skip re-rendering B / S
     return sizes

@@ -905,6 +905,10 @@ namespace sl {
 
     static void RespawnHouse(u8* body);
     static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
+    static int RemovableBuildingOfBody(u8* body);   /* a spawned shop / service copy: its type, else 0 */
+    /* Buildings tab cells (tab 7, see RemovableBuildingOfBody) */
+    static const s16 k_BuildingCells[] = { 19, 21, 20, 24, 25 };   /* Cranny, Museum, Resident Services, Able Sisters, Campsite */
+    constexpr int BuildingCells = sizeof(k_BuildingCells) / sizeof(k_BuildingCells[0]);
 
     /* -- component slots (x0 = component) -- */
     static void BldNoop(BldComp*) {}
@@ -1000,7 +1004,7 @@ namespace sl {
        spawn menu (opened on a borrowed house) is involved: with yes on every building the editor got
        stuck after a spawn menu closed. Y itself is handled in EditorPad, which hides it from the game. */
     bool SpawnBusy();
-    static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && StructureOfBody(c->body) ? 1 : 0; }
+    static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && (StructureOfBody(c->body) || RemovableBuildingOfBody(c->body)) ? 1 : 0; }
 
     static void InitBldVtable() {
         if (s_BldVt[0]) return;
@@ -1227,6 +1231,25 @@ namespace sl {
         return body;
     }
 
+    /* For Y: the nearest bridge / incline, or a spawned shop / service copy (within 30 of its middle). */
+    constexpr float BuildingReach = 30.0f;
+    static u8* NearestRemovable() {
+        if (!LiveLayout(s_EditLayout)) return nullptr;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8* body = nullptr;
+        float best = 1e9f;
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            int kind = StructureOfBody(a);
+            float reach = kind == 26 ? BridgeReach : kind == 27 ? InclineReach : RemovableBuildingOfBody(a) ? BuildingReach : 0.0f;
+            if (reach <= 0.0f) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
+            if (d < reach * reach && d < best) { best = d; body = a; }
+        });
+        return body;
+    }
+
     /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
     void EditorPad(void* states, int count) {
         if (!states || count <= 0 || !EditorMap() || s_EditClosing) return;
@@ -1258,12 +1281,12 @@ namespace sl {
         bool zl = (newest >> 8) & 1, zr = (newest >> 9) & 1;
         u64 hide = 0;
         static bool s_Hiding[3] = {};   /* decided on the press (before a removal), kept while held */
-        bool near = cursorMode && !SpawnBusy() && ((y && !s_YWas) || (zl && !s_ZlWas) || (zr && !s_ZrWas)) && NearestStructure();
+        bool near = cursorMode && !SpawnBusy() && (((y && !s_YWas) && NearestRemovable()) || (((zl && !s_ZlWas) || (zr && !s_ZrWas)) && NearestStructure()));
         if (y && !s_YWas) s_Hiding[0] = near;
         if (zl && !s_ZlWas) s_Hiding[1] = near;
         if (zr && !s_ZrWas) s_Hiding[2] = near;
         if (cursorMode && !SpawnBusy() && LiveLayout(s_EditLayout) && ((y && !s_YWas) || (zl && !s_ZlWas) || (zr && !s_ZrWas))) {
-            u8* body = NearestStructure();
+            u8* body = (y && !s_YWas) ? NearestRemovable() : NearestStructure();
             if (!body) {
                 const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
                 Log("structures: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
@@ -1894,7 +1917,8 @@ namespace sl {
     constexpr u32 HomeTabEntrySize   = 0x70;
     constexpr u32 BridgeTabKind      = 0x7f;        /* not one of the game's kinds (0x2a-0x2f) */
     constexpr u32 InclineTabKind     = 0x7e;
-    constexpr int BridgeTab          = 5, InclineTab = 6, HomeTabCount = 7;
+    constexpr u32 BuildingsTabKind   = 0x7d;
+    constexpr int BridgeTab          = 5, InclineTab = 6, BuildingsTab = 7, HomeTabCount = 8;
     constexpr u32 MenuTabIndex       = 0x1c290;
     constexpr u32 TabBtnKind         = 0x270, TabBtnAnim = 600;
     constexpr u32 AnimFrameQueryGot  = 0x4ac4f00;   /* vtable base of the anim query object */
@@ -1916,7 +1940,8 @@ namespace sl {
         if (!g || g->count != 5 || !g->entries) return gameDesc;
         memcpy(s_HomeTabs, g->entries, 5 * HomeTabEntrySize);
         static const struct { int tab; u32 kind; const char* label; } extra[] = {
-            { BridgeTab, BridgeTabKind, "1290" }, { InclineTab, InclineTabKind, "1291" } };   /* bridges_tab.py */
+            { BridgeTab, BridgeTabKind, "1290" }, { InclineTab, InclineTabKind, "1291" },
+            { BuildingsTab, BuildingsTabKind, "1292" } };   /* bridges_tab.py */
         for (const auto& x : extra) {
             u8* e = s_HomeTabs + x.tab * HomeTabEntrySize;
             memcpy(e, g->entries + 1 * HomeTabEntrySize, HomeTabEntrySize);
@@ -1944,7 +1969,7 @@ namespace sl {
     /* After 0x3033694 put frame 0 on an unknown kind: the bridge kind gets Pattern frame 5
        (same calls as the end of 0x3033694). */
     void HomeTabIcon(u8* btn, u32 kind) {
-        int tab = kind == BridgeTabKind ? BridgeTab : kind == InclineTabKind ? InclineTab : -1;
+        int tab = kind == BridgeTabKind ? BridgeTab : kind == InclineTabKind ? InclineTab : kind == BuildingsTabKind ? BuildingsTab : -1;
         if (tab < 0 || !btn) return;
         u8* anim = *reinterpret_cast<u8**>(btn + TabBtnAnim);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
@@ -2021,6 +2046,7 @@ namespace sl {
         s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
         if (tab == BridgeTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
         if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
+        if (tab == BuildingsTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BuildingCells;
         /* current look (the pink card with the tick) and the cursor's start: the grid reads the
            current item of the tab clamped to 0-4 (tab 0, +0x1c1f4), so on the extra tabs tab 0's
            slot holds ours, and gets its own value back on the game's tabs */
@@ -2058,18 +2084,19 @@ namespace sl {
     constexpr u32 CellNameOff  = 0x1c4e0;
     static const u16 k_BridgeNameIds[8]  = { 60000, 60001, 60002, 60003, 60004, 60005, 60006, 60007 };
     static const u16 k_InclineNameIds[8] = { 60010, 60011, 60012, 60013, 60014, 60015, 60016, 60017 };
+    static const u16 k_BuildingNameIds[8] = { 60020, 60021, 60022, 60023, 60024, 60025, 60026, 60027 };
 
     void HomeCellName(u8* menu, void* ev, void (*orig)(u8*, void*)) {
         u32& tab = *reinterpret_cast<u32*>(menu + MenuTabIndex);
-        if (!EditorMap() || (tab != (u32)BridgeTab && tab != (u32)InclineTab)) { orig(menu, ev); return; }
+        if (!EditorMap() || (tab != (u32)BridgeTab && tab != (u32)InclineTab && tab != (u32)BuildingsTab)) { orig(menu, ev); return; }
         u32 savedTab = tab;
         u32& count = *reinterpret_cast<u32*>(menu + CellNameOff);
         const u16*& ids = *reinterpret_cast<const u16**>(menu + CellNameOff + 8);
         u32 savedCount = count;
         const u16* savedIds = ids;
         tab = 1;
-        count = 8;
-        ids = savedTab == (u32)BridgeTab ? k_BridgeNameIds : k_InclineNameIds;
+        count = savedTab == (u32)BuildingsTab ? (u32)BuildingCells : 8;
+        ids = savedTab == (u32)BridgeTab ? k_BridgeNameIds : savedTab == (u32)InclineTab ? k_InclineNameIds : k_BuildingNameIds;
         orig(menu, ev);
         tab = savedTab;
         count = savedCount;
@@ -2089,7 +2116,7 @@ namespace sl {
             for (s32 k = 0; k < 0x10e; k++) {
                 u8* sl = menu + 0x2a0 + k * 0x1a8;
                 if (*reinterpret_cast<s32*>(sl + 0x1a0) != 0 || ((sl[0x18] >> 1) & 1)) continue;
-                char name[4] = { tab == BridgeTab ? 'B' : 'S', (char)('0' + idx % 10), 0, 0 };
+                char name[4] = { tab == BridgeTab ? 'B' : tab == InclineTab ? 'S' : 'H', (char)('0' + idx % 10), 0, 0 };
                 struct { uintptr_t vt; const char* str; } nm = { *reinterpret_cast<uintptr_t*>(Main(SafeStringVtGot)) + 0x10, name };
                 reinterpret_cast<void (*)(u8*, void*, void*, u32)>(Main(IconLoad))(sl, &nm, *reinterpret_cast<void**>(Main(NoneItemGot)), IconKindShape);
                 slot = k;
@@ -2184,6 +2211,27 @@ namespace sl {
         return t == BridgeBuildingType || t == InclineBuildingType ? t : 0;
     }
 
+    /* Buildings tab (tab 7): shops / services the spawn menu can place. Tested by writing copies into
+       a save (2026-11-26, real Switch): a copy loads and is saved, its door leads into the original
+       (you come out of the original). Built at grass level: on the beach they float, so the tab only
+       places on flat ground at 0 or above. Order = the tab's cells (building_icons.py). */
+    /* (k_BuildingCells: see the forward declarations near RemovableBuildingOfBody's) */
+
+    /* A copy is any record of one of those types with an earlier record of the same type: Y may
+       remove it. The first one (the island's own) never. */
+    static int RemovableBuildingOfBody(u8* body) {
+        u8* recs = BuildingRecords();
+        if (!recs || !body) return 0;
+        u32 i = *reinterpret_cast<u32*>(body + ActorRecordIndex);
+        if (i >= 47) return 0;
+        s16 t = *reinterpret_cast<s16*>(recs + i * 0x14);
+        bool listed = false;
+        for (s16 b : k_BuildingCells) if (b == t) listed = true;
+        if (!listed) return 0;
+        for (u32 k = 0; k < i; k++) if (*reinterpret_cast<s16*>(recs + k * 0x14) == t) return t;
+        return 0;
+    }
+
     static int s_MenuBridge = -1;   /* record of the bridge / incline the house menu was opened on, or -1 */
     static int s_MenuKind = 0;      /* its record type (26 / 27) */
     bool ApplyInclinePick(int rec, int which);
@@ -2259,6 +2307,7 @@ namespace sl {
         Log("bridges: cell %d picked (slot %d)", idx, slot);
         int want = tab == BridgeTab ? BridgeBuildingType : InclineBuildingType;
         if (s_SpawnMode) { Log("spawn menu: pick tab %d cell %d", tab, idx); if (idx >= 0) SpawnStructure(tab, idx); return; }
+        if (tab == BuildingsTab) { Log("buildings: open the menu with D-pad left to place one"); return; }
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
             else ApplyInclinePick(s_MenuBridge, idx);
@@ -2552,6 +2601,23 @@ namespace sl {
         } else if (tab == InclineTab) {
             if (cell >= (int)(sizeof(k_InclineIds) / 2)) return false;
             type = InclineBuildingType; id = k_InclineIds[cell];
+        } else if (tab == BuildingsTab) {
+            if (cell >= BuildingCells) return false;
+            type = k_BuildingCells[cell]; id = 0;
+            /* Buildings are built at grass level: only on flat ground at 0 or above (not the beach) */
+            const Vec3f* cc = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            using HeightFn = float (*)(float, float*, u32*, u64);
+            float lo = 1e9f, hi = -1e9f;
+            for (int k = 0; k < 5; k++) {
+                float pt[3] = { cc->x + (k == 1 ? -20.0f : k == 2 ? 20.0f : 0.0f), 0.0f, cc->z + (k == 3 ? -20.0f : k == 4 ? 20.0f : 0.0f) };
+                float hgt = reinterpret_cast<HeightFn>(Main(GroundHeight))(0.0f, pt, nullptr, 0);
+                if (hgt < lo) lo = hgt;
+                if (hgt > hi) hi = hgt;
+            }
+            if (lo < -0.5f || hi - lo > 1.0f) {
+                Log("buildings: not placed - the ground isn't flat grass here (height %d..%d)", (int)lo, (int)hi);
+                return false;
+            }
         } else return false;
         int slot = -1;
         for (int i = 0; i < 47 && slot < 0; i++) {
@@ -2572,7 +2638,7 @@ namespace sl {
         s_New[s_NewCount].idx = slot;
         memcpy(s_New[s_NewCount].raw, raw, 0x14);
         s_NewCount++;
-        Log("spawn: %s id %x in record %d at %d %d", type == BridgeBuildingType ? "bridge" : "incline", id, slot,
+        Log("spawn: %s id %x in record %d at %d %d", type == BridgeBuildingType ? "bridge" : type == InclineBuildingType ? "incline" : "building", id, slot,
             *reinterpret_cast<u16*>(raw + 2) * 5, *reinterpret_cast<u16*>(raw + 4) * 5);
         SpawnRecordActor(slot);
         s_ShapePending |= 1ull << slot;
@@ -2655,7 +2721,7 @@ namespace sl {
     static void DeleteActorsOfRecord(int idx) {
         using DelFn = void (*)(u8*);
         ForEachActor([&](u8* a) {
-            if (VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == (u32)idx && StructureOfBody(a))
+            if (VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == (u32)idx && (StructureOfBody(a) || RemovableBuildingOfBody(a)))
                 reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
         });
     }
@@ -2663,6 +2729,7 @@ namespace sl {
     bool RemoveStructure(u8* body) {
         u8* recs = BuildingRecords();
         int type = StructureOfBody(body);
+        if (!type) type = RemovableBuildingOfBody(body);
         u32 idx = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
         if (!recs || !type || idx >= 47 || s_RemovedCount >= 16) return false;
         RemovedStructure& r = s_Removed[s_RemovedCount++];
@@ -2676,7 +2743,7 @@ namespace sl {
         reinterpret_cast<DelFn>(Main(ActorRequestDelete))(body);
         s_ShapePending |= 1ull << idx;
         s_RemovePending |= 1ull << idx;
-        Log("spawn: removed %s record %d (id %x)", type == BridgeBuildingType ? "bridge" : "incline", (int)idx,
+        Log("spawn: removed %s record %d (id %x)", type == BridgeBuildingType ? "bridge" : type == InclineBuildingType ? "incline" : "building", (int)idx,
             *reinterpret_cast<u16*>(r.raw + 8));
         return true;
     }
@@ -3353,7 +3420,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.64-spawntest23 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.65-buildings1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
