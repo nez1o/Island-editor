@@ -2779,6 +2779,42 @@ namespace sl {
         }
     }
 
+    /* ---- XLink (effects ELink / sounds SLink) on the editor cursor ----
+       The editor cursor has an XLink user "FtrEditCursor" in both ELink2DB and SLink2DB (found by
+       reading the DBs: keywords such as 道造成消失煙 (path-building vanish smoke), 坂の撤去 (incline
+       removal), しまう (put away), 90度回転させる (rotate 90), 橋坂外観変更 (bridge/incline look change)).
+       The game emits one like 0x13ba1d8: asset = 0x3af5ec0(*(*(obj+0x30)+0x18), name); then
+       0x3af47b0(obj, {SafeString-ish vt (*(main+0x4acadf8)+0x10), asset, 0}, &handle). The cursor's
+       XLink objects: 0x13b9f78(area fx, owner) runs while editing; owner+8 is the ELink object it emits
+       the edit-area effect on. */
+    static u8* s_XOwner = nullptr;   /* captured from 0x13b9f78's second argument */
+    static u8* s_XArea = nullptr;
+    void CaptureEditXLink(u8* area, u8* owner) { s_XArea = area; s_XOwner = owner; }
+
+    static bool XLinkEmit(u8* obj, const char* name) {
+        if (!obj || !name) return false;
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        void* ctx = a30 ? *reinterpret_cast<void**>(a30 + 0x18) : nullptr;
+        if (!ctx) return false;
+        void* asset = reinterpret_cast<void* (*)(void*, const char*)>(Main(0x3af5ec0))(ctx, name);
+        if (!asset) return false;
+        struct { uintptr_t vt; void* asset; u8 flag; u8 pad[7]; } q = { *reinterpret_cast<uintptr_t*>(Main(0x4acadf8)) + 0x10, asset, 0, {} };
+        struct { u64 h; u32 x; u32 pad; } out = {};
+        reinterpret_cast<void (*)(u8*, void*, void*)>(Main(0x3af47b0))(obj, &q, &out);
+        return true;
+    }
+
+    /* dbg "emit <obj> <keyword>": run on the game thread (BridgeTick). */
+    static std::atomic<int> s_EmitPending{0};
+    static uintptr_t s_EmitObj = 0;
+    static char s_EmitName[96];
+    static void RunPendingEmit() {
+        if (!s_EmitPending.load(std::memory_order_acquire)) return;
+        bool ok = XLinkEmit(reinterpret_cast<u8*>(s_EmitObj), s_EmitName);
+        Log("xlink: emit '%s' on %lx -> %s", s_EmitName, (unsigned long)s_EmitObj, ok ? "found + emitted" : "keyword not found");
+        s_EmitPending.store(0, std::memory_order_release);
+    }
+
     /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
        hung in the air (seen on a Switch). Every 20 frames each building on the main island whose middle
        isn't on the ground is moved there (body and its parts, like a grab; within 20, so a building
@@ -2822,6 +2858,7 @@ namespace sl {
 
     /* Game thread, every frame. */
     void BridgeTick() {
+        RunPendingEmit();
         SnapBuildingsToGround();
         KeepRemoved();
         KeepNew();
@@ -3244,7 +3281,7 @@ namespace sl {
         struct { const char* name; uintptr_t v; } names[] = {
             { "main", exl::util::modules::GetTargetStart() }, { "cam", (uintptr_t)s_DbgCam },
             { "player", (uintptr_t)s_LocalPlayer }, { "layout", (uintptr_t)s_EditLayout },
-            { "recs", (uintptr_t)BuildingRecords() },
+            { "recs", (uintptr_t)BuildingRecords() }, { "xowner", (uintptr_t)s_XOwner }, { "xarea", (uintptr_t)s_XArea },
             { "mod", exl::util::modules::GetSelfStart() },
         };
         for (auto& n : names) {
@@ -3358,6 +3395,19 @@ namespace sl {
         uintptr_t a;
         if (!DbgExpr(p, &a)) { DbgPrint("! bad address"); return; }
         if (strcmp(cmd, "addr") == 0) { DbgPrint("= %lx (main+%lx)", (unsigned long)a, (unsigned long)(a - exl::util::modules::GetTargetStart())); return; }
+        if (strcmp(cmd, "emit") == 0) {   /* emit <obj> <keyword>: XLink keyword on an XLink object (game thread; result in log.txt) */
+            if (s_EmitPending.load()) { DbgPrint("! an emit is still pending"); return; }
+            if (!MemOk(a, 0x38, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            const char* nm = SkipWs(p);
+            size_t n = strlen(nm);
+            while (n && (nm[n - 1] == '\r' || nm[n - 1] == '\n' || nm[n - 1] == ' ')) n--;
+            if (!n || n >= sizeof(s_EmitName)) { DbgPrint("! bad keyword"); return; }
+            memcpy(s_EmitName, nm, n); s_EmitName[n] = 0;
+            s_EmitObj = a;
+            s_EmitPending.store(1, std::memory_order_release);
+            DbgPrint("queued (see log.txt)");
+            return;
+        }
         if (strcmp(cmd, "peek") == 0) {
             long words = strtol(SkipWs(p), nullptr, 0);
             if (words <= 0) words = 16;
@@ -3472,7 +3522,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.65-buildings4 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -3820,6 +3870,14 @@ HOOK_DEFINE_TRAMPOLINE(EditCursorCentre) {
 /* "Can the held item go here?" (x0 = drag holder; +0x88 set = cache the answer at +0x78).
    0x13f20f8 puts the item at the target when this says yes, else back where it came from.
    On the main island the answer is always yes (the game's own check still runs first). */
+/* Editor's garden-edit-area effect update (x0 = area effect, x1 = the cursor's XLink owner). */
+HOOK_DEFINE_TRAMPOLINE(EditAreaFx) {
+    static void Callback(u8* area, u8* owner) {
+        sl::CaptureEditXLink(area, owner);
+        Orig(area, owner);
+    }
+};
+
 HOOK_DEFINE_TRAMPOLINE(EditCanPlace) {
     static u32 Callback(u8* holder, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         u32 r = Orig(holder, a1, a2, a3, a4, a5, a6, a7);
@@ -4276,6 +4334,7 @@ extern "C" void exl_main(void* x0, void* x1) {
     EditCameraZoomHook::InstallAtOffset(0x7cfa20);
     StateChangeHook::InstallAtOffset(0x3dbb160);
     EditCanPlace::InstallAtOffset(0x13ea4c0);
+    EditAreaFx::InstallAtOffset(0x13b9f78);
     BuildingHoverGate::InstallAtOffset(0x13cfd7c);
     BuildingAtCell::InstallAtOffset(0x13d0308);
     BuildingHover::InstallAtOffset(0x13f1bc4);
