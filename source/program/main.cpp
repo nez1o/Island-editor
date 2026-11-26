@@ -1441,6 +1441,12 @@ namespace sl {
             int m;
             if (fk == 1 && !BridgeLook((u16)r[4], &m, &shape)) shape = 0;
         }
+        /* the record's rotation isn't always 0-3 (4 seen on an incline, a bridge across the screen read
+           0): the body's own angle (+0x2b4 of its transform, a full turn = 2^32) is what's drawn */
+        if (u8* xf = *reinterpret_cast<u8**>(body + ActorTransform)) {
+            u32 ang = *reinterpret_cast<u32*>(xf + 0x2b4);
+            rot = (int)(((ang + 0x20000000u) >> 30) & 3);
+        }
         if (fk == 0) if (s16* r = RecordOfBody(body)) { if (r[0] == 26) fk = 1; else if (r[0] == 27) fk = 2; }
         int dk = fk == 1 && shape >= 3 ? 3 : fk;
         DimTune d = s_Dim[dk];
@@ -1494,8 +1500,12 @@ namespace sl {
             if (body != s_LastBody) {
                 s_LastBody = body;
                 s16* rr = RecordOfBody(body);
-                Log("square: body %p rec %d type %d rot %d kind %d at %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
-                    rr ? rr[0] : -1, rr ? rr[3] : -1, fk, (int)p->x, (int)p->z);
+                u8* xf = *reinterpret_cast<u8**>(body + ActorTransform);
+                float lhx, lhz, lox, loz;
+                SquareDims(body, fk, &lhx, &lhz, &lox, &loz);
+                Log("square: body %p rec %d type %d rot %d ang %x kind %d at %d %d half %d %d off %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
+                    rr ? rr[0] : -1, rr ? rr[3] : -1, xf ? *reinterpret_cast<u32*>(xf + 0x2b4) : 0, fk, (int)p->x, (int)p->z,
+                    (int)lhx, (int)lhz, (int)lox, (int)loz);
             }
         }
         float hx, hz, ox, oz;
@@ -1519,9 +1529,16 @@ namespace sl {
             if (hi > 5) return lo;                         /* the game draws no square wider than 5 tiles (sai's house at 6) */
             return raw - lo < hi - raw ? lo : hi;
         };
-        s32 w = pick(hx, cx), dz = pick(hz, cz);
-        *txOut = w - 1;
-        *tzOut = dz - 1;
+        (void)pick;
+        /* The drawn square takes its size from this footprint and turns it by the body's angle itself
+           (a turned bridge got a square turned twice), and its middle from the rect cells, which
+           SquareCells gives in half tiles. So: unturned sizes here. */
+        float uhx = hx, uhz = hz;
+        if (u8* xf = *reinterpret_cast<u8**>(body + ActorTransform))
+            if ((((*reinterpret_cast<u32*>(xf + 0x2b4) + 0x20000000u) >> 30) & 1) != 0) { uhx = hz; uhz = hx; }
+        auto tiles = [](float half) { s32 n = (s32)(half / 5.0f + 0.5f); return n < 1 ? 1 : n > 5 ? 5 : n; };
+        *txOut = tiles(uhx) - 1;
+        *tzOut = tiles(uhz) - 1;
         pos->x = cx; pos->z = cz; pos->y += s_Foot[fk].dy;
     }
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
@@ -3986,7 +4003,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn14 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn16 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
