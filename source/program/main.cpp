@@ -1372,7 +1372,12 @@ namespace sl {
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
     FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
     struct DimTune { float hx, hz, ox, oz, perTile; };
-    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 10, 12, 0, 0, 5 }, { 9, 28, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 10, 12, 0, 0, 5 }, { 24, 9, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    /* Houses / shops: one size per record type (sai's player house and a villager house differ):
+       half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
+       index = record type, 4 floats each). 0 = use s_Dim[0]. */
+    struct TypeDim { float hx, hz, ox, oz; };
+    TypeDim s_TypeDim[48] = {};
     static s16* RecordOfBody(u8* body) {
         u8* recs = BuildingRecords();
         u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
@@ -1388,7 +1393,11 @@ namespace sl {
             if (fk == 1 && !BridgeLook((u16)r[4], &m, &shape)) shape = 0;
         }
         int dk = fk == 1 && shape >= 3 ? 3 : fk;
-        const DimTune& d = s_Dim[dk];
+        DimTune d = s_Dim[dk];
+        if (fk == 0) if (s16* r = RecordOfBody(body)) if (r[0] > 0 && r[0] < 48 && s_TypeDim[r[0]].hx > 0) {
+            const TypeDim& t = s_TypeDim[r[0]];
+            d.hx = t.hx; d.hz = t.hz; d.ox = t.ox; d.oz = t.oz; d.perTile = 0;
+        }
         float len = (float)((shape % 3) + 3);            /* bridges: 3 / 4 / 5 tiles */
         float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
         float ox = d.ox, oz = d.oz;
@@ -3818,7 +3827,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn5 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn6 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
