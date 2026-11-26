@@ -2081,8 +2081,10 @@ namespace sl {
     }
 
     void ShrinkTick();
+    void TurnPopTick();
     void BuildingTick() {
         HeldTick();
+        TurnPopTick();
         ShrinkTick();
         BounceTick();
         CliffStackTick();
@@ -2969,6 +2971,37 @@ namespace sl {
            lookup stayed empty), so both showed stacked for ~2 s (Switch video). */
         if (s_Reshape.frames >= 2) FinishReshape();
     }
+    /* A turn like furniture: the actor can't be turned while standing (its turn is set when it's built),
+       so the old one dips (smaller, lower) for the frames before it's deleted and the new one pops up
+       from that with a little overshoot. Scale (body +0x818) and height are read every frame. */
+    struct TurnPop { bool active; int idx; u32 old[4]; int n; int f; float y; u32 h; };
+    static TurnPop s_Pop = {};
+    static const float k_PopS[] = { 0.82f, 0.88f, 0.95f, 1.02f, 1.07f, 1.08f, 1.05f, 1.01f, 0.99f, 1.0f };
+    static const float k_PopY[] = { -1.5f, -0.8f, 0.2f, 1.2f, 1.8f, 1.6f, 1.0f, 0.4f, 0.0f, 0.0f };
+    static void SetLook(u8* a, float sc, float y) {
+        *reinterpret_cast<Vec3f*>(a + 0x818) = { sc, sc, sc };
+        reinterpret_cast<Vec3f*>(a + 0x7f0)->y = y;
+        reinterpret_cast<Vec3f*>(a + 0x7fc)->y = y;
+    }
+    void TurnPopTick() {
+        if (!s_Pop.active) return;
+        u8* nb = s_Pop.h ? ActorOfHandle(s_Pop.h) : nullptr;
+        if (!nb && s_Pop.f == 0) {
+            ForEachActor([&](u8* a) {
+                if (nb || VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)s_Pop.idx) return;
+                u32 h = *reinterpret_cast<u32*>(a + 0x230);
+                for (int i = 0; i < s_Pop.n; i++) if (s_Pop.old[i] == h) return;
+                nb = a;
+            });
+            if (!nb) return;
+            s_Pop.h = *reinterpret_cast<u32*>(nb + 0x230);
+            s_Pop.y = reinterpret_cast<Vec3f*>(nb + 0x7f0)->y;
+        }
+        if (!nb || s_Pop.f >= (int)(sizeof(k_PopS) / sizeof(k_PopS[0]))) { s_Pop.active = false; return; }
+        SetLook(nb, k_PopS[s_Pop.f], s_Pop.y + k_PopY[s_Pop.f]);
+        s_Pop.f++;
+    }
+
     bool ReshapeStructure(u8* body, bool rotate, bool resize) {
         u8* recs = BuildingRecords();
         int type = StructureOfBody(body);
@@ -2996,6 +3029,15 @@ namespace sl {
             if (s_Reshape.n < 4 && VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == idx && StructureOfBody(a))
                 s_Reshape.old[s_Reshape.n++] = *reinterpret_cast<u32*>(a + 0x230);
         });
+        if (rotate) {
+            if (s_Pop.active) if (u8* a = s_Pop.h ? ActorOfHandle(s_Pop.h) : nullptr) SetLook(a, 1.0f, s_Pop.y);
+            s_Pop = {};
+            s_Pop.active = true; s_Pop.idx = (int)idx; s_Pop.n = s_Reshape.n;
+            for (int i = 0; i < s_Reshape.n; i++) {
+                s_Pop.old[i] = s_Reshape.old[i];
+                if (u8* a = ActorOfHandle(s_Reshape.old[i])) SetLook(a, 0.85f, reinterpret_cast<Vec3f*>(a + 0x7f0)->y - 1.5f);
+            }
+        }
         WriteRecord((int)idx, raw);
         memcpy(s_New[n].raw, raw, 0x14);
         s_Reshape.newH = SpawnRecordActor((int)idx);
@@ -3981,7 +4023,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn18 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn19 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
