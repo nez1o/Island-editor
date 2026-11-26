@@ -2379,9 +2379,10 @@ namespace sl {
        roof tab with a list of made-up ids 60000+ (bridges) / 60010+ (inclines), whose names
        bridges_tab.py adds to STR_HouseRoofName (the game's bridge / incline kit names). */
     constexpr u32 CellNameOff  = 0x1c4e0;
-    static const u16 k_BridgeNameIds[8]  = { 60000, 60001, 60002, 60003, 60004, 60005, 60006, 60007 };
-    static const u16 k_InclineNameIds[8] = { 60010, 60011, 60012, 60013, 60014, 60015, 60016, 60017 };
-    static const u16 k_BuildingNameIds[8] = { 60020, 60021, 60022, 60023, 60024, 60025, 60026, 60027 };
+    /* With the spaces left (sai): bridges_tab.py adds each name once per count 0..47, as
+       61000 / 62000 / 63000 (bridges / inclines / buildings) + cell * 50 + spaces left. */
+    int SpawnSpacesLeft();
+    static u16 s_CellNameIds[16];
 
     void HomeCellName(u8* menu, void* ev, void (*orig)(u8*, void*)) {
         u32& tab = *reinterpret_cast<u32*>(menu + MenuTabIndex);
@@ -2393,7 +2394,10 @@ namespace sl {
         const u16* savedIds = ids;
         tab = 1;
         count = savedTab == (u32)BuildingsTab ? (u32)BuildingCells : 8;
-        ids = savedTab == (u32)BridgeTab ? k_BridgeNameIds : savedTab == (u32)InclineTab ? k_InclineNameIds : k_BuildingNameIds;
+        int left = SpawnSpacesLeft();
+        u32 base = savedTab == (u32)BridgeTab ? 61000 : savedTab == (u32)InclineTab ? 62000 : 63000;
+        for (u32 i = 0; i < count && i < 16; i++) s_CellNameIds[i] = (u16)(base + i * 50 + (u32)left);
+        ids = s_CellNameIds;
         orig(menu, ev);
         tab = savedTab;
         count = savedCount;
@@ -2919,6 +2923,22 @@ namespace sl {
     }
 
     static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at);
+    /* Free records for a spawn (all 47 building records; at most 16 spawns kept at once). */
+    int SpawnSpacesLeft() {
+        u8* recs = BuildingRecords();
+        if (!recs) return 0;
+        int n = 0;
+        for (int i = 0; i < 47; i++) {
+            const u8* r = recs + i * 0x14;
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (empty) n++;
+        }
+        int cap = 16 - s_NewCount;
+        if (n > cap) n = cap;
+        return n < 0 ? 0 : n > 47 ? 47 : n;
+    }
+
     bool SpawnStructure(int tab, int cell) {
         u8* recs = BuildingRecords();
         if (!recs || !LiveLayout(s_EditLayout) || cell < 0) return false;
@@ -4075,7 +4095,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn27 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn28 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");

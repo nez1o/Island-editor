@@ -314,6 +314,17 @@ def build(romfs, out, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read
                     label = '%05d' % (60020 + i)
                     assert not any(e[0] == label for e in entries)
                     entries.append([label, attr, text.encode('utf-16le') + b'\0\0'])
+                # the same names with the spaces left for a spawn: base + cell * 50 + n (main.cpp HomeCellName)
+                def strip(b):
+                    return b[:-2] if b.endswith(b'\0\0') else b
+                tabs = ((61000, [kit_names[it][1:] for it in CELL_NAMES_BRIDGE]),
+                        (62000, [kit_names[it][1:] for it in CELL_NAMES_INCLINE]),
+                        (63000, [(attr, t.encode('utf-16le')) for t in building_icons.NAMES]))
+                for base, cells in tabs:
+                    for i, (a_, text) in enumerate(cells):
+                        for n in range(48):
+                            tail = (' (%d left)' % n).encode('utf-16le')
+                            entries.append(['%05d' % (base + i * 50 + n), a_, strip(text) + tail + b'\0\0'])
                 f[1] = msbt_write(header, ngroups, asize, entries)
                 continue
             if f[0] != 'STR_CategoryName.msbt': continue
