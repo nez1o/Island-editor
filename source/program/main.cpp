@@ -1424,13 +1424,13 @@ namespace sl {
     /* measured from sai's straight-down screenshots (2026-11-26): player houses, villager houses,
        Nook's Cranny 19, Resident Services 20, Museum 21, Able Sisters 24, campsite 25 */
     TypeDim s_TypeDim[48] = {
-        {}, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f },
-        { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f }, { 26, 21, -1.5f, -18.3f },
-        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
-        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
-        { 21.5f, 22, 0, -25.7f }, { 21.5f, 22, 0, -25.7f },
-        { 34, 29, 0.7f, -18.7f }, { 29.5f, 28, -1.8f, -29.8f }, { 36, 29, 0, -22 }, {}, {}, { 24, 24, 3, -26.5f },
-        { 21, 25, -0.7f, -20.4f } };
+        {}, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 },
+        { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 34, 29, 0, -5 }, { 29.5f, 28, 0, -5 }, { 36, 29, 0, -5 }, {}, {}, { 24, 24, 0, -5 },
+        { 21, 25, 0, -5 } };
     static s16* RecordOfBody(u8* body) {
         u8* recs = BuildingRecords();
         u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
@@ -3981,7 +3981,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn17 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn18 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
