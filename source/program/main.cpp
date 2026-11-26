@@ -974,7 +974,7 @@ namespace sl {
     /* Buildings are rebuilt at grass level wherever they go (seen on a Switch: a shop dragged onto
        the beach hung in the air). Flat ground at 0 or above around (x, z): the middle and 4 points
        <r> away. */
-    static bool FlatGroundAt(float x, float z, float r, float* loOut = nullptr, float* hiOut = nullptr) {
+    [[maybe_unused]] static bool FlatGroundAt(float x, float z, float r, float* loOut = nullptr, float* hiOut = nullptr) {
         using HeightFn = float (*)(float, float*, u32*, u64);
         float lo = 1e9f, hi = -1e9f;
         for (int k = 0; k < 5; k++) {
@@ -988,14 +988,9 @@ namespace sl {
         return lo >= -0.5f && hi - lo <= 1.0f;
     }
 
-    /* 0x70: placement check - bridges / inclines anywhere (they may stack); houses and shops only on
-       flat ground (the editor then refuses the drop and puts the building back). */
+    /* 0x70: placement check - anywhere goes on the main island (bridges may stack too). */
     static int StructureOfBody(u8* body);
-    static u32 BldValid(BldComp* c, u64, const u8*) {
-        if (!c->grabbed) return 0;
-        if (StructureOfBody(c->body)) return 1;
-        return FlatGroundAt(c->startX + c->dx, c->startZ + c->dz, 20.0f) ? 1 : 0;
-    }
+    static u32 BldValid(BldComp* c, u64, const u8*) { return c->grabbed ? 1 : 0; }   /* SnapBuildingsToGround fixes the height */
 
     /* 0x78: drop at pos and keep it. */
     static void BldDrop(BldComp* c, const u8* pos) {
@@ -2632,13 +2627,6 @@ namespace sl {
         } else if (tab == BuildingsTab) {
             if (cell >= BuildingCells) return false;
             type = k_BuildingCells[cell]; id = 0;
-            /* Buildings are built at grass level: only on flat ground at 0 or above (not the beach) */
-            const Vec3f* cc = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
-            float lo, hi;
-            if (!FlatGroundAt(cc->x, cc->z, 20.0f, &lo, &hi)) {
-                Log("buildings: not placed - the ground isn't flat grass here (height %d..%d)", (int)lo, (int)hi);
-                return false;
-            }
         } else return false;
         int slot = -1;
         for (int i = 0; i < 47 && slot < 0; i++) {
@@ -2791,8 +2779,50 @@ namespace sl {
         }
     }
 
+    /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
+       hung in the air (seen on a Switch). Every 20 frames each building on the main island whose middle
+       isn't on the ground is moved there (body and its parts, like a grab; within 20, so a building
+       half over a cliff edge is left alone). Bridges / inclines and a held building are skipped. */
+    static void SnapBuildingsToGround() {
+        static int s_Tick = 0;
+        if (++s_Tick < 20) return;
+        s_Tick = 0;
+        if (!EditorMapStage()) return;
+        struct Snap { u8* body; float x, z, dy; };
+        Snap snaps[48];
+        int n = 0;
+        using HeightFn = float (*)(float, float*, u32*, u64);
+        ForEachActor([&](u8* a) {
+            if (n >= 48 || VtOf(a) != BuildingBodyVt || StructureOfBody(a)) return;
+            BldComp* c = CompOf(a);
+            if (c && c->grabbed) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float pt[3] = { p->x, 0.0f, p->z };
+            float g = reinterpret_cast<HeightFn>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, pt, nullptr, 0);
+            float dy = g - p->y;
+            if (dy > -0.3f && dy < 0.3f) return;
+            if (dy < -20.0f || dy > 20.0f) return;
+            snaps[n++] = { a, p->x, p->z, dy };
+        });
+        if (!n) return;
+        ForEachActor([&](u8* a) {
+            u32 pair = PartPair(a);
+            if (!pair) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + (VtOf(a) == SignVt ? 0x160 : pair));
+            for (int i = 0; i < n; i++) {
+                float dx = p->x - snaps[i].x, dz = p->z - snaps[i].z;
+                if (dx < -8 || dx > 8 || dz < -8 || dz > 8) continue;
+                for (u32 off : { pair, pair + 0xcu }) reinterpret_cast<Vec3f*>(a + off)->y += snaps[i].dy;
+                break;
+            }
+        });
+        static int s_Logged = 0;
+        if (s_Logged < 10) { s_Logged++; Log("buildings: %d moved to the ground (first by %d)", n, (int)snaps[0].dy); }
+    }
+
     /* Game thread, every frame. */
     void BridgeTick() {
+        SnapBuildingsToGround();
         KeepRemoved();
         KeepNew();
         KeepOverrides();
@@ -3442,7 +3472,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.65-buildings3 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.65-buildings4 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
