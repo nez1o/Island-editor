@@ -921,6 +921,8 @@ namespace sl {
        cell instead of jumping (a visual offset on top of the real position, undone before anything
        reads or changes it for real). */
     static BldComp* s_HeldComp = nullptr;
+    static float s_DragOffX = 0, s_DragOffZ = -5.0f;
+    static void SquareOffset(u8* body, float* ox, float* oz);
     static Vec3f s_HeldV = {};          /* offset applied to the parts right now */
     static float s_GlideX = 0, s_GlideZ = 0;
     static int s_HeldT = 0;
@@ -953,7 +955,11 @@ namespace sl {
         }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
         Vec3f hv = c == s_HeldComp ? s_HeldV : Vec3f{};
-        c->pos = { p->x - hv.x, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z - 5.0f };
+        /* the square is drawn here (its size from the footprint FootOf sets): the middle of the
+           structure, not the body (sizes / offsets changed nothing while this was body z - 5) */
+        float ox, oz;
+        SquareOffset(c->body, &ox, &oz);
+        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z + oz };
         return &c->pos;
     }
 
@@ -976,6 +982,7 @@ namespace sl {
             c->part[c->parts] = a; c->pair[c->parts] = pair; c->parts++;
         });
         c->startX = bx; c->startZ = bz; c->dx = c->dz = 0;
+        SquareOffset(c->body, &s_DragOffX, &s_DragOffZ);   /* BldPos reports the square's middle */
         c->grabbed = 1;
         ShiftParts(c, 0, 0, BldLift);
         s_HeldComp = c; s_HeldV = {}; s_GlideX = s_GlideZ = 0; s_HeldT = 0;
@@ -996,7 +1003,7 @@ namespace sl {
     static void SquareDims(u8* body, int fk, float* hxOut, float* hzOut, float* oxOut, float* ozOut);
     static void BldDrag(BldComp* c, const u8* pos) {
         if (!c->grabbed || !pos) return;
-        float x = *reinterpret_cast<const float*>(pos + 8), z = *reinterpret_cast<const float*>(pos + 0x10) + 5.0f;
+        float x = *reinterpret_cast<const float*>(pos + 8) - s_DragOffX, z = *reinterpret_cast<const float*>(pos + 0x10) - s_DragOffZ;
         float tx = RoundToStep(x - c->startX, 5.0f);
         float tz = RoundToStep(z - c->startZ, 5.0f);
         if (tx == c->dx && tz == c->dz) return;
@@ -1065,8 +1072,6 @@ namespace sl {
     bool SpawnBusy();
     static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && (StructureOfBody(c->body) || RemovableBuildingOfBody(c->body)) ? 1 : 0; }
 
-    static void BldRectFullOurs(BldComp* c, u8* out, const u8* pos);
-    static void BldRectMinOurs(BldComp* c, u8* out, const u8* pos);
     static void InitBldVtable() {
         if (s_BldVt[0]) return;
         const uintptr_t* game = reinterpret_cast<const uintptr_t*>(Main(BldCompVtable));
@@ -1080,8 +1085,7 @@ namespace sl {
         s_BldVt[0x70 / 8] = reinterpret_cast<const void*>(&BldValid);
         s_BldVt[0x78 / 8] = reinterpret_cast<const void*>(&BldDrop);
         s_BldVt[0xb0 / 8] = reinterpret_cast<const void*>(&BldCanRemove);
-        s_BldVt[0xd0 / 8] = reinterpret_cast<const void*>(&BldRectMinOurs);
-        s_BldVt[0xd8 / 8] = reinterpret_cast<const void*>(&BldRectFullOurs);
+
     }
 
     static bool CompInUse(BldComp& c) {
@@ -1460,38 +1464,18 @@ namespace sl {
         for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
         *hxOut = hx; *hzOut = hz; *oxOut = ox; *ozOut = oz;
     }
-    /* The square in 5-unit cells straight from the structure (half-tile spots too): the game's own rect
-       (0x2a85468) snaps to whole tiles, so at half-tile spots it sat half a tile off. Used for the
-       comp's rect slots 0xd8 (full: +0x10 x0, +0x14 z0, +0x20 x1, +0x24 z1) and 0xd0 (min: +8 x0, +0xc z0). */
-    static bool SquareCells(BldComp* c, s32* x0, s32* z0, s32* x1, s32* z1) {
-        if (!c || !c->body || c->state) return false;
+    /* Square middle minus the body position, rounded so the middle sits on the 5-unit grid. */
+    static void SquareOffset(u8* body, float* oxOut, float* ozOut) {
+        *oxOut = 0; *ozOut = -5.0f;
         Vec3f sp;
-        if (SpawnPosFor(c->body, &sp)) return false;   /* the borrowed spawn house: the game's own (tiny) one */
-        int k = StructureOfBody(c->body);
-        int fk = k == 26 ? 1 : k == 27 ? 2 : 0;
+        if (!body || SpawnPosFor(body, &sp)) return;
+        int k = StructureOfBody(body);
         float hx, hz, ox, oz;
-        SquareDims(c->body, fk, &hx, &hz, &ox, &oz);
-        Vec3f p = *reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
-        if (c == s_HeldComp) { p.x -= s_HeldV.x; p.z -= s_HeldV.z; }
-        auto tiles = [](float half) { s32 n = (s32)(half / 5.0f + 0.5f); return n < 1 ? 1 : n > 5 ? 5 : n; };
-        s32 w = tiles(hx), d = tiles(hz);
-        auto cell = [](float v) { return (s32)__builtin_floorf(v / 5.0f + 0.5f); };
-        *x0 = cell(p.x + ox - 5.0f * w); *x1 = *x0 + 2 * w - 1;
-        *z0 = cell(p.z + oz - 5.0f * d); *z1 = *z0 + 2 * d - 1;
-        return true;
-    }
-    static void BldRectFullOurs(BldComp* c, u8* out, const u8* pos) {
-        reinterpret_cast<void (*)(BldComp*, u8*, const u8*)>(Main(BldRectFull))(c, out, pos);
-        s32 x0, z0, x1, z1;
-        if (!out || !SquareCells(c, &x0, &z0, &x1, &z1)) return;
-        *reinterpret_cast<s32*>(out + 0x10) = x0; *reinterpret_cast<s32*>(out + 0x14) = z0;
-        *reinterpret_cast<s32*>(out + 0x20) = x1; *reinterpret_cast<s32*>(out + 0x24) = z1;
-    }
-    static void BldRectMinOurs(BldComp* c, u8* out, const u8* pos) {
-        reinterpret_cast<void (*)(BldComp*, u8*, const u8*)>(Main(BldRectMin))(c, out, pos);
-        s32 x0, z0, x1, z1;
-        if (!out || !SquareCells(c, &x0, &z0, &x1, &z1)) return;
-        *reinterpret_cast<s32*>(out + 8) = x0; *reinterpret_cast<s32*>(out + 0xc) = z0;
+        SquareDims(body, k == 26 ? 1 : k == 27 ? 2 : 0, &hx, &hz, &ox, &oz);
+        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        auto r5 = [](float v) { return (float)(s32)__builtin_floorf(v / 5.0f + 0.5f) * 5.0f; };
+        *oxOut = r5(p->x + ox) - p->x;
+        *ozOut = r5(p->z + oz) - p->z;
     }
     static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
         const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
@@ -1529,16 +1513,9 @@ namespace sl {
             if (hi > 5) return lo;                         /* the game draws no square wider than 5 tiles (sai's house at 6) */
             return raw - lo < hi - raw ? lo : hi;
         };
-        (void)pick;
-        /* The drawn square takes its size from this footprint and turns it by the body's angle itself
-           (a turned bridge got a square turned twice), and its middle from the rect cells, which
-           SquareCells gives in half tiles. So: unturned sizes here. */
-        float uhx = hx, uhz = hz;
-        if (u8* xf = *reinterpret_cast<u8**>(body + ActorTransform))
-            if ((((*reinterpret_cast<u32*>(xf + 0x2b4) + 0x20000000u) >> 30) & 1) != 0) { uhx = hz; uhz = hx; }
-        auto tiles = [](float half) { s32 n = (s32)(half / 5.0f + 0.5f); return n < 1 ? 1 : n > 5 ? 5 : n; };
-        *txOut = tiles(uhx) - 1;
-        *tzOut = tiles(uhz) - 1;
+        s32 w = pick(hx, cx), dz = pick(hz, cz);
+        *txOut = w - 1;
+        *tzOut = dz - 1;
         pos->x = cx; pos->z = cz; pos->y += s_Foot[fk].dy;
     }
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
@@ -1598,8 +1575,9 @@ namespace sl {
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
             *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
-        if (out) BldRectFullOurs(c, out, reinterpret_cast<const u8*>(&at));
-        if (minOut) BldRectMinOurs(c, minOut, reinterpret_cast<const u8*>(&at));
+        using RectFn = void (*)(BldComp*, u8*, void*);
+        if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
+        if (minOut) reinterpret_cast<RectFn>(Main(BldRectMin))(c, minOut, &at);
         return *reinterpret_cast<u32*>(body + 0x230);
     }
 
@@ -4003,7 +3981,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn16 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn17 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
