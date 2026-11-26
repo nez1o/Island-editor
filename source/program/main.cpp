@@ -922,7 +922,7 @@ namespace sl {
         if (SpawnPosFor(c->body, &sp)) {
             /* 100 under the ground: the editor's square / hand for the borrowed house showed at the
                cursor for a moment when the spawn menu opened (Switch video) */
-            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y - 100.0f, sp.z };
+            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y - 1000.0f, sp.z };   /* (100 under still showed a tiny square) */
             return &c->pos;
         }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
@@ -1897,7 +1897,7 @@ namespace sl {
     static u32 s_BounceH = 0;
     static int s_BounceF = -1;
     static float s_BounceBase = 0.0f;
-    static const float k_Bounce[] = { 3.0f, 4.5f, 4.0f, 2.5f, 0.8f, -0.6f, -0.3f, 0.0f };
+    static const float k_Bounce[] = { 2.0f, 3.5f, 4.0f, 3.5f, 2.2f, 0.6f, -0.8f, -0.6f, 0.3f, 0.6f, 0.2f, 0.0f };
     static void BounceTick() {
         if (s_BounceF < 0) return;
         u8* b = ActorOfHandle(s_BounceH);
@@ -1918,6 +1918,14 @@ namespace sl {
             if (r.idx == 0xffffffff) continue;
             r.frames++;
             u8* nb = ActorOfHandle(r.newBody);
+            if (!nb) {   /* the spawner's handle doesn't always resolve (seen with bridges): the record's body that isn't an old one */
+                ForEachActor([&](u8* a) {
+                    if (nb || VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != r.idx) return;
+                    u32 h = *reinterpret_cast<u32*>(a + 0x230);
+                    for (int i = 0; i < r.oldCount; i++) if (r.old[i] == h) return;
+                    nb = a;
+                });
+            }
             bool ready = r.frames >= 150;
             if (nb && r.frames >= 2 && StructureOfBody(nb)) ready = true;   /* a bridge / incline is its body alone: a duplicate showed for ~3 s */
             if (nb && r.frames >= 4) {
@@ -1932,7 +1940,7 @@ namespace sl {
                 if (fresh > 0 || r.frames >= 90) ready = true;
             }
             if (!ready) continue;
-            if (nb && StructureOfBody(nb)) { s_BounceH = r.newBody; s_BounceF = 0; }
+            if (nb && StructureOfBody(nb)) { s_BounceH = *reinterpret_cast<u32*>(nb + 0x230); s_BounceF = 0; }
             for (int i = 0; i < r.oldCount; i++)
                 if (u8* a = ActorOfHandle(r.old[i])) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
             r.idx = 0xffffffff;
@@ -3764,7 +3772,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn1 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn2 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
