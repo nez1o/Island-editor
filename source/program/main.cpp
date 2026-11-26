@@ -1371,6 +1371,11 @@ namespace sl {
         if (!body) return 0;
         BldComp* c = AttachComp(body);
         if (!c) return 0;
+        /* the borrowed house's footprint (4x4 tiles) showed as a big square at the cursor for a moment
+           when D-pad left was pressed (Switch video): one tile while it's only borrowed */
+        s32 tiles = body == s_SpawnBody && (s_SpawnArmed || s_SpawnMode) ? 0 : 3;
+        *reinterpret_cast<s32*>(c->owner + 0x5b8) = tiles;
+        *reinterpret_cast<s32*>(c->owner + 0x5bc) = tiles;
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
             *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, *BldPos(c),
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
@@ -2954,13 +2959,26 @@ namespace sl {
     /* Effects 2.5x the path tool's size (sai: "make the clouds bigger"). Sounds get no position:
        the effect event's layout (+0xa8 position...) isn't a sound event's, and with it most sounds
        didn't play (sai: "barely no sounds"); the dbg test without a position played fine. */
+    /* Played from BridgeTick (the game's frame): turn / remove run in the controller hook, and sounds
+       started there never played (Switch: silent turns), while the same sounds sent through dbg
+       (played in BridgeTick) did. */
+    struct FxReq { const char* effect; const char* sound; Vec3f at; };
+    static FxReq s_FxQueue[8];
+    static int s_FxCount = 0;
     static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at) {
-        if (effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, effect, &at, 2.5f); }
-        if (sound) {
-            u8* so = XObjOfCtx(s_EditSCtx);
-            if (so) XLinkEmit(so, sound);
-            else Log("xlink: no sound player yet (hover something in the editor once)");
+        if (s_FxCount < 8) s_FxQueue[s_FxCount++] = { effect, sound, at };
+    }
+    static void RunEditFx() {
+        for (int i = 0; i < s_FxCount; i++) {
+            const FxReq& r = s_FxQueue[i];
+            if (r.effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, r.effect, &r.at, 2.5f); }
+            if (r.sound) {
+                u8* so = XObjOfCtx(s_EditSCtx);
+                if (so) XLinkEmit(so, r.sound);
+                else Log("xlink: no sound player yet (hover something in the editor once)");
+            }
         }
+        s_FxCount = 0;
     }
 
     /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
@@ -3007,6 +3025,7 @@ namespace sl {
     /* Game thread, every frame. */
     void BridgeTick() {
         RunPendingEmit();
+        RunEditFx();
         ReshapeTick();
         PendingSpawnTick();
         SnapBuildingsToGround();
@@ -3692,7 +3711,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx8 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx9 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
