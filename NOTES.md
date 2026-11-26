@@ -266,6 +266,19 @@ Spawns bridges / inclines at the cursor from HHP's exterior menu, opened on a bo
   for live memory (a full `find` takes ~40 s on a Switch vs ~5 min in Eden). Keep the console's own
   exefs/main.npdm (the exlaunch one lacks services the real game needs). Screenshots: /Nintendo/Album.
   spawntest23: `find` re-checks each page before reading (a scan crashed the game when memory was freed).
+- **Buildings tab (v0.65, works on a Switch 2026-11-26)**: tab 7 (kind 0x7d, label 1292) in the spawn
+  menu places copies of Nook's Cranny (19), Museum (21), Resident Services (20), Able Sisters (24),
+  Campsite (25) (`k_BuildingCells`). Tested first by writing records straight into a save (all three
+  images): copies load and save; a copy's door leads into the original. Y removes a copy (a record of
+  those types with an earlier record of the same type; never the original), deleting every actor of the
+  record (a moved building briefly keeps its old actor). Pictures: `tools/building_icons.py` (pixel art,
+  Model/Layout_HouseShapeIcon_H0..H4); names STR_HouseRoofName 60020+. `tools/build_tabs.py` rebuilds just
+  the menu files into an existing mod romfs (TAB_ICONS_ONLY=H keeps the bridge pictures).
+  The game builds houses / shops at the cliff level's height, so on the beach they floated:
+  `SnapBuildingsToGround` (every 20 frames, main island) moves each one's body + parts to the ground
+  height at its middle. Spawn picks within 10 s of D-pad left count even if the spawn timing missed the
+  menu opening (it opened slower on a Switch). Not done: collision of a freshly placed building (until
+  reload), empty houses / decorations (types not tested).
 - Still to do: Buildings tab (empty houses, shops & services, decorations) with pixel-art icons
   (`tools/bridges_tab.py` / `bridge_icons.py` show how tabs and icons are added), the D-pad left icon in the
   editor's D-pad guide (empty left slot), remove the test logging (camera snapshot/diff, zoom logs) before a release.
