@@ -964,8 +964,12 @@ namespace sl {
     }
 
     /* 0x58: grab - collect the building's actors around the body. */
+    static bool RespawnPending(u8* body);
     static bool BldGrab(BldComp* c) {
         if (c->state == 1) return false;
+        /* just dropped and still being rebuilt: grabbing the old actor, which the rebuild then deleted,
+           left the hand dragging nothing (the camera followed it out to sea - Switch video) */
+        if (RespawnPending(c->body)) { Log("buildings: still rebuilding - grab ignored"); return false; }
         const Vec3f* b = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
         float bx = b->x, bz = b->z;
         c->parts = 0;
@@ -1523,12 +1527,15 @@ namespace sl {
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
         float cz = *reinterpret_cast<const s32*>(query + 0xc) * 5.0f + 2.5f;
         u8* body = nullptr;
-        ForEachActor([&](u8* a) {
+        /* D-pad left just pressed: always the borrowed house (a bridge next to the cursor got the menu,
+           which then wasn't a spawn menu and the pick was dropped - Switch video) */
+        bool spawning = s_SpawnArmed && SpawnWithin(0, 300);
+        if (!spawning) ForEachActor([&](u8* a) {
             if (body || VtOf(a) != BuildingBodyVt || IsBridgeBody(a)) return;
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
             if (cx >= p->x - 20 && cx < p->x + 20 && cz >= p->z - 25 && cz < p->z + 25) body = a;
         });
-        if (!body) {   /* bridges and inclines (building bodies too): near their middle */
+        if (!body && !spawning) {   /* bridges and inclines (building bodies too): near their middle */
             float best = 1e9f;
             ForEachActor([&](u8* a) {
                 if (VtOf(a) != BuildingBodyVt) return;
@@ -1541,9 +1548,9 @@ namespace sl {
             });
         }
         s_HoverHandle = body && StructureOfBody(body) ? *reinterpret_cast<u32*>(body + 0x230) : 0;
-        if (!body && s_SpawnArmed && SpawnWithin(0, 300)) {   /* spawn: borrow any house to open the menu on */
+        if (!body && spawning) {   /* spawn: borrow any house to open the menu on */
             ForEachActor([&](u8* a) {
-                if (!body && VtOf(a) == BuildingBodyVt && !IsBridgeBody(a)) body = a;
+                if (!body && VtOf(a) == BuildingBodyVt && !IsBridgeBody(a) && !StructureOfBody(a) && !RemovableBuildingOfBody(a)) body = a;
             });
             s_SpawnBody = body;
         }
@@ -1698,6 +1705,12 @@ namespace sl {
     constexpr int MaxRespawns = 4;
     struct Respawn { u32 idx; u32 newBody; u32 old[MaxDragParts + 1]; int oldCount; int frames; bool dirty; };
     static Respawn s_Respawns[MaxRespawns] = { { 0xffffffff }, { 0xffffffff }, { 0xffffffff }, { 0xffffffff } };
+    static bool RespawnPending(u8* body) {
+        if (!body) return false;
+        u32 idx = *reinterpret_cast<u32*>(body + ActorRecordIndex);
+        for (const Respawn& r : s_Respawns) if (r.idx != 0xffffffff && r.idx == idx) return true;
+        return false;
+    }
 
     static bool HouseNear(u8* a, const Vec3f& b, u32* pairOut) {
         u32 pair = PartPair(a);
@@ -4023,7 +4036,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn19 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn20 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
