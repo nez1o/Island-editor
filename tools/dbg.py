@@ -66,7 +66,9 @@ if os.environ.get('SWITCH_FTP'):
         except ftplib.error_perm: return None
         return buf.getvalue().decode('utf-8', 'replace')
     ftp = connect()
-    before = fetch(ftp, 'dbg_out.txt')
+    # a unique first line, so two identical answers in a row still count as new (FTP gives no mtime)
+    nonce = 'addr %#x' % (int(time.time() * 1000) & 0xffffffffff)
+    lines = [nonce] + lines
     # written under another name and renamed: the module polls 4x a second and could read a half-written file
     ftp.storbinary('STOR /slumbertoggle/cmd.tmp', io.BytesIO(('\n'.join(lines) + '\n').encode()))
     ftp.rename('/slumbertoggle/cmd.tmp', '/slumbertoggle/cmd.txt')
@@ -79,8 +81,8 @@ if os.environ.get('SWITCH_FTP'):
             ftp = connect(); continue
         if any(n.rstrip('/').endswith('cmd.txt') for n in names): continue
         out = fetch(ftp, 'dbg_out.txt')
-        if out is not None and out != before and out.rstrip().endswith('# done'):
-            print(out, end='')
+        if out is not None and out.startswith('> ' + nonce) and out.rstrip().endswith('# done'):
+            print(out.split('\n', 2)[2], end='')   # without the nonce lines
             sys.exit(0)
     try: ftp.delete('/slumbertoggle/cmd.txt')
     except ftplib.all_errors: pass

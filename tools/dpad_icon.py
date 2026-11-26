@@ -1,24 +1,25 @@
-# RomFS side of the island editor's D-pad left guide: the editor's D-pad guide (top left) shows a
-# faded left arrow on the main island. D-pad left opens the module's spawn menu there, so the left
-# slot gets a lit arrow and a "spawn" icon (a bridge with a plus), drawn here from simple shapes (no
-# game art).
+# RomFS side of the island editor's D-pad left guide: the editor's D-pad guide (top left, layout
+# Layout/InteriorWherearenIslands) shows a greyed-out left arrow on the main island. D-pad left opens
+# the module's spawn menu there, so the left slot gets a lit arrow and a "spawn" icon (a bridge with
+# a plus), drawn here from simple shapes (no game art).
 #
-# How the guide works (found in the dump and checked live on a Switch, 2026-11-26): the guide is the
-# part layout Layout/LRoomGuide (sun icon on top, list icon on the right). Its animation
-# LRoomGuide_Type (step keys, bound through group G_Type_00) picks the left slot:
-#   frame 0: nothing (faded arrow P_JujiL_02 in N_Type_02)            <- the island editor
-#   frame 1: clothes (N_Type_01 / N_Type_03), frame 2: seasons (N_Type_00 / N_Type_04),
-#   frame 3: time edit (N_Type_06 / N_Type_05: lit arrow + P_IconTimeEdit_08 / _02)
-# (two copies of each: N_InOut_00 and the shadow branch N_InOutSh_00). The game re-applies the
-# animation, so a poke of a pane's visible bit gets undone; the layout file has to change.
-# Changes: frame 0 shows the time-edit slot instead of the faded arrow, and its icons get a texture
-# pattern (FLTP): frame 0 = new IconSpawnDpad^s, other frames = the game's IconCatTimeEdit^s. The icon
-# panes join G_Type_00 so the animation reaches their materials; the layout defaults match frame 0.
-# Side effect: wherever else this guide runs at frame 0 (house interior editing), the icon shows too.
-# (InteriorWherearenIslands has a similar guide, N_TypeInside_05 / N_Type_06, that isn't what shows.)
+# How the slot works (found in the dump, checked live on a Switch 2026-11-26 with tools/dbg.py): the
+# guide is drawn twice; the copy on screen on the main island is N_InOutLeft_01 > N_Type_02 (sun icon
+# on top, faded left arrow P_JujiL_05, list icon on the right). The other copy (N_InOutLeft_00 >
+# N_Type_06) is drawn too but doesn't show. Animation InteriorWherearenIslands_KeyLeft (step keys,
+# applied when the editor opens) picks the left slot; frame 2 = seasons: N_KeyLeft_03 / N_KeyLeft_02
+# (lit arrow + P_Season_01 / P_Season_00). The island editor runs at frame 0, where they are hidden.
+# Poking N_KeyLeft_03's visible bit live showed the lit arrow + icon on screen.
+# Changes, for both copies:
+#   - KeyLeft frame 0 shows the season slot; its icon gets a texture pattern (FLTP): frame 0 = new
+#     IconSpawnDpad^s, other frames = the game's GuideIconSeasons^s; the icon panes join group
+#     G_KeyLeft_00 (the animation binds through it); layout defaults match frame 0
+#   - bntx: the new texture (BC4 128x128 mask the layout tints, like IconCatInteriorPlus^s)
+# Side effect: anywhere else this guide runs at frame 0 (HHP exteriors before seasons are unlocked),
+# the spawn icon shows too. (Layout/LRoomGuide looks similar but isn't this guide.)
 #
 # usage (standalone): python3 tools/dpad_icon.py <RomFS dir> <out romfs dir> [preview.png]
-#   writes <out>/Layout/LRoomGuide.Nin_NX_NVN.zs and raises its entry in
+#   writes <out>/Layout/InteriorWherearenIslands.Nin_NX_NVN.zs and raises its entry in
 #   <out>/System/Resource/ResourceSizeTable.srsizetable (which must already be there).
 # build_romfs.py calls build() and handles the size table itself.
 import os, struct, sys
@@ -28,17 +29,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bflan, bntx_write, bc4, swz, bridge_icons
 
-LAYOUT = 'LRoomGuide'
+LAYOUT = 'InteriorWherearenIslands'
 TEXTURE = 'IconSpawnDpad^s'
-TEMPLATE = 'IconCatTimeEdit^s'          # the game's icon in that slot; also the format / size template
-ICONS = ['P_IconTimeEdit_08', 'P_IconTimeEdit_02']   # time-edit slot icons (front, shadow branch)
-GROUP = 'G_Type_00'
-ANIM = 'Type'
-TYPE_KEYS = {'N_Type_02': [(0.0, 0)],                          # faded arrow: was 1 / 0
-             'N_Type_06': [(0.0, 1), (1.0, 0), (3.0, 1)],      # time edit: was - / - / 0 / 1
-             'N_Type_05': [(0.0, 1), (1.0, 0), (3.0, 1)]}
-SHOWN = ['N_Type_06', 'N_Type_05']
-HIDDEN = ['N_Type_02']
+TEMPLATE = 'IconCatInteriorPlus^s'      # format / size template for the new texture
+# (lit slot pane, its icon pane = material, the game's icon texture, frame where the game shows it)
+SLOTS = [('N_KeyLeft_03', 'P_Season_01', 'GuideIconSeasons^s', 2),   # the copy on screen
+         ('N_KeyLeft_02', 'P_Season_00', 'GuideIconSeasons^s', 2)]
 
 
 def zs_read(path):
@@ -117,46 +113,48 @@ def patch_layout(body):
     for i in range(n):
         o = p + struct.unpack_from('<I', body, p + 0xc + 4 * i)[0]
         mname = bytes(body[o:o + 0x1c]).split(b'\0')[0].decode()
-        if mname in ICONS:
-            assert struct.unpack_from('<H', body, o + 0x2c)[0] == names.index(TEMPLATE.encode()), mname
-            struct.pack_into('<H', body, o + 0x2c, tex_index)
-            done.add(mname)
-    assert done == set(ICONS), done
+        for _slot, mat, tex, _f in SLOTS:
+            if mname == mat:
+                assert struct.unpack_from('<H', body, o + 0x2c)[0] == names.index(tex.encode()), mat
+                struct.pack_into('<H', body, o + 0x2c, tex_index)
+                done.add(mat)
+    assert done == {m for _s, m, _t, _f in SLOTS}, done
     # default visibility (pane flag byte +8, bit 0), as at frame 0
     seen = set()
     for t, p, sz in sections(body):
         if t != b'pan1': continue
         name = bytes(body[p + 0xc:p + 0x24]).split(b'\0')[0].decode()
-        if name in SHOWN: body[p + 8] |= 1; seen.add(name)
-        if name in HIDDEN: body[p + 8] &= ~1; seen.add(name)
-    assert seen == set(SHOWN + HIDDEN), seen
-    # the animation's group (grp1: name[0x22], u16 count, names[24]): add the icon panes
+        if name in [sl for sl, *_ in SLOTS]: body[p + 8] |= 1; seen.add(name)
+    assert len(seen) == len(SLOTS), seen
+    # group G_KeyLeft_00 (grp1: name[0x22], u16 count, names[24]): add the icon panes
     for t, g, gsz in sections(body):
-        if t == b'grp1' and bytes(body[g + 8:g + 0x2a]).split(b'\0')[0] == GROUP.encode():
+        if t == b'grp1' and bytes(body[g + 8:g + 0x2a]).split(b'\0')[0] == b'G_KeyLeft_00':
             cnt = struct.unpack_from('<H', body, g + 0x2a)[0]
-            add = b''.join(m.encode().ljust(24, b'\0') for m in ICONS)
+            add = b''.join(m.encode().ljust(24, b'\0') for _s, m, _t, _f in SLOTS)
             body[g + gsz:g + gsz] = add
-            struct.pack_into('<H', body, g + 0x2a, cnt + len(ICONS))
+            struct.pack_into('<H', body, g + 0x2a, cnt + len(SLOTS))
             struct.pack_into('<I', body, g + 4, gsz + len(add))
             break
     else:
-        raise ValueError(GROUP + ' not found')
+        raise ValueError('G_KeyLeft_00 not found')
     struct.pack_into('<I', body, 0xc, len(body))
     return bytes(body)
 
 
 # ---------------------------------------------------------------- animation
-def patch_type(data):
+def patch_key_left(data):
     a = bflan.read(data)
     pai = [s for mg, s in a['sections'] if mg == b'pai1'][0]
-    assert pai['frames'] == 3 and not pai['textures']
+    assert pai['frames'] == 2 and not pai['textures']
+    keys = {'N_KeyLeft_02': [(0.0, 1), (1.0, 0), (2.0, 1)],     # was - / 0 / 1
+            'N_KeyLeft_03': [(0.0, 1), (1.0, 0), (2.0, 1)]}
     done = set()
     for e in pai['entries']:
-        if e['name'] in TYPE_KEYS:
-            e['tags'][0]['infos'][0]['keys'] = TYPE_KEYS[e['name']]; done.add(e['name'])
-    assert done == set(TYPE_KEYS), done
-    pai['textures'] = [TEXTURE, TEMPLATE]
-    for mat in ICONS:
+        if e['name'] in keys:
+            e['tags'][0]['infos'][0]['keys'] = keys[e['name']]; done.add(e['name'])
+    assert done == set(keys), done
+    pai['textures'] = [TEXTURE, 'GuideIconSeasons^s']
+    for _s, mat, _tex, _f in SLOTS:
         pai['entries'].append(dict(name=mat, kind=1, tags=[dict(tag='FLTP', infos=[
             dict(index=0, target=0, curve=1, keys=[(0.0, 0), (1.0, 1)])])]))
     return bflan.write(a)
@@ -170,7 +168,7 @@ def build(romfs, out, sarc_files, sarc_rebuild):
     inner = dict(sarc_files(arc))
     new_arc = sarc_rebuild(arc, {
         'blyt/%s.bflyt' % LAYOUT: patch_layout(inner['blyt/%s.bflyt' % LAYOUT]),
-        'anim/%s_%s.bflan' % (LAYOUT, ANIM): patch_type(inner['anim/%s_%s.bflan' % (LAYOUT, ANIM)]),
+        'anim/%s_KeyLeft.bflan' % LAYOUT: patch_key_left(inner['anim/%s_KeyLeft.bflan' % LAYOUT]),
         'timg/__Combined.bntx': add_texture(inner['timg/__Combined.bntx']),
     })
     whole = sarc_rebuild(d, {arc_name: new_arc})
