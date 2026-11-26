@@ -904,6 +904,7 @@ namespace sl {
     }
 
     static void RespawnHouse(u8* body);
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at);
     static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
     static int RemovableBuildingOfBody(u8* body);   /* a spawned shop / service copy: its type, else 0 */
     /* Buildings tab cells (tab 7, see RemovableBuildingOfBody) */
@@ -952,6 +953,7 @@ namespace sl {
         ShiftParts(c, 0, 0, BldLift);
         BuildingSlot(c, false);
         Log("buildings: grabbed building at (%d, %d), %d parts", (int)bx, (int)bz, c->parts);
+        PlayEditFx(nullptr, "家具をつかむ", Vec3f{ bx, b->y, bz });   /* like grabbing furniture */
         return true;
     }
 
@@ -1004,6 +1006,7 @@ namespace sl {
             SaveBuildingMove(*reinterpret_cast<u32*>(c->body + ActorRecordIndex), c->startX, c->startZ,
                              (s32)(c->dx / 5.0f), (s32)(c->dz / 5.0f));
         BuildingSlot(c, true);
+        PlayEditFx(nullptr, "家具をはなす", *reinterpret_cast<const Vec3f*>(c->body + 0x7f0));   /* like dropping furniture */
         if (c->dx == 0 && c->dz == 0) return;
         Log("buildings: dropped, moved by (%d, %d)", (int)c->dx, (int)c->dz);
         RespawnHouse(c->body);   /* rebuilt at the new spot: ground height, door, etc. */
@@ -1322,6 +1325,26 @@ namespace sl {
                     else ReshapeStructure(body, false, true);
                 }
             }
+        }
+        /* A tapped (released within 0.3 s, not grabbed) on a bridge / incline you spawned: a quarter
+           turn, like tapping A on furniture (holding A still grabs) */
+        {
+            static bool s_AWas = false;
+            static s64 s_ADown = 0;
+            static u32 s_ABody = 0;
+            bool aBtn = newest & 1;
+            if (aBtn && !s_AWas) {
+                u8* nb = cursorMode && !SpawnBusy() ? NearestStructure() : nullptr;
+                s_ABody = nb ? *reinterpret_cast<u32*>(nb + 0x230) : 0;
+                s_ADown = NowTick();
+            }
+            if (!aBtn && s_AWas && s_ABody && NowTick() - s_ADown < MsTicks(300)) {
+                u8* nb = ActorOfHandle(s_ABody);
+                BldComp* cc = nb ? CompOf(nb) : nullptr;
+                if (nb && !(cc && cc->grabbed)) ReshapeStructure(nb, true, false);
+            }
+            if (!aBtn) s_ABody = 0;
+            s_AWas = aBtn;
         }
         if (!y) s_Hiding[0] = false;
         if (!zl) s_Hiding[1] = false;
@@ -1869,7 +1892,25 @@ namespace sl {
     }
 
     /* Every frame: finish rebuilds whose new body has spawned its parts. */
+    /* A dropped bridge / incline lands with a little bounce, like furniture: once its rebuilt body is
+       there, its height follows these offsets for a few frames. */
+    static u32 s_BounceH = 0;
+    static int s_BounceF = -1;
+    static float s_BounceBase = 0.0f;
+    static const float k_Bounce[] = { 3.0f, 4.5f, 4.0f, 2.5f, 0.8f, -0.6f, -0.3f, 0.0f };
+    static void BounceTick() {
+        if (s_BounceF < 0) return;
+        u8* b = ActorOfHandle(s_BounceH);
+        if (!b) { s_BounceF = -1; return; }
+        if (s_BounceF == 0) s_BounceBase = reinterpret_cast<Vec3f*>(b + 0x7f0)->y;
+        float y = s_BounceBase + k_Bounce[s_BounceF];
+        reinterpret_cast<Vec3f*>(b + 0x7f0)->y = y;
+        reinterpret_cast<Vec3f*>(b + 0x7fc)->y = y;
+        if (++s_BounceF >= (int)(sizeof(k_Bounce) / sizeof(k_Bounce[0]))) s_BounceF = -1;
+    }
+
     void BuildingTick() {
+        BounceTick();
         CliffStackTick();
         UnlockTick();
         using DelFn = void (*)(u8*);
@@ -1891,6 +1932,7 @@ namespace sl {
                 if (fresh > 0 || r.frames >= 90) ready = true;
             }
             if (!ready) continue;
+            if (nb && StructureOfBody(nb)) { s_BounceH = r.newBody; s_BounceF = 0; }
             for (int i = 0; i < r.oldCount; i++)
                 if (u8* a = ActorOfHandle(r.old[i])) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
             r.idx = 0xffffffff;
@@ -3722,7 +3764,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx11 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
