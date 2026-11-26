@@ -2613,6 +2613,7 @@ namespace sl {
         SyncSaveCopies();
     }
 
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at);
     bool SpawnStructure(int tab, int cell) {
         u8* recs = BuildingRecords();
         if (!recs || !LiveLayout(s_EditLayout) || cell < 0) return false;
@@ -2651,6 +2652,7 @@ namespace sl {
             *reinterpret_cast<u16*>(raw + 2) * 5, *reinterpret_cast<u16*>(raw + 4) * 5);
         SpawnRecordActor(slot);
         s_ShapePending |= 1ull << slot;
+        PlayEditFx("道造成煙：四角", "家具をはなす", *c);   /* a puff + the "put down" sound */
         return true;
     }
 
@@ -2711,12 +2713,15 @@ namespace sl {
             if (type != BridgeBuildingType || !BridgeLook(r[4], &m, &k)) { Log("structures: record %d has no other sizes", (int)idx); return false; }
             r[4] = k_BridgeIds[m][(k + 1) % BridgeShapes];
         }
+        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);   /* (before its actor goes) */
         DeleteActorsOfRecord((int)idx);
         WriteRecord((int)idx, raw);
         memcpy(s_New[n].raw, raw, 0x14);
         SpawnRecordActor((int)idx);
         s_ShapePending |= 1ull << idx;
         Log("structures: record %d %s -> rotation %d id %x", (int)idx, rotate ? "turned" : "resized", r[3], r[4]);
+        if (rotate) PlayEditFx(nullptr, "90度回転させる", at);
+        else PlayEditFx("道造成煙：角丸", "橋坂外観変更", at);
         return true;
     }
 
@@ -2748,6 +2753,8 @@ namespace sl {
         for (int i = 0; i < s_OverrideCount; i++) if (s_Overrides[i].idx == (int)idx) s_Overrides[i--] = s_Overrides[--s_OverrideCount];
         /* every actor of this record, not just the one under the cursor: a building that was just
            moved still has its old actor for a moment, which stayed visible and needed more presses */
+        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        PlayEditFx("道造成消失煙", "しまう", at);   /* the path tool's vanishing smoke + "put away" */
         DeleteActorsOfRecord((int)idx);   /* (includes <body>; deleting one twice isn't safe) */
         u8 zero[0x14] = {};
         WriteRecord((int)idx, zero);
@@ -2791,7 +2798,8 @@ namespace sl {
     static u8* s_XArea = nullptr;
     void CaptureEditXLink(u8* area, u8* owner) { s_XArea = area; s_XOwner = owner; }
 
-    static bool XLinkEmit(u8* obj, const char* name) {
+    static bool MemOk(uintptr_t a, size_t len, bool write);
+    static bool XLinkEmit(u8* obj, const char* name, const Vec3f* at = nullptr) {
         if (!obj || !name) return false;
         u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
         void* ctx = a30 ? *reinterpret_cast<void**>(a30 + 0x18) : nullptr;
@@ -2801,6 +2809,19 @@ namespace sl {
         struct { uintptr_t vt; void* asset; u8 flag; u8 pad[7]; } q = { *reinterpret_cast<uintptr_t*>(Main(0x4acadf8)) + 0x10, asset, 0, {} };
         struct { u64 h; u32 x; u32 pad; } out = {};
         reinterpret_cast<void (*)(u8*, void*, void*)>(Main(0x3af47b0))(obj, &q, &out);
+        /* An effect plays where it's told: like 0x13ba100 (the edit-area effect), the started event
+           (handle +0, checked by its id at +0x20 == handle +8) gets a position at +0xa8, scale 1 at
+           +0xb4, and flag 4 at +0x184 (use that transform). Without it nothing showed. */
+        u8* ev = reinterpret_cast<u8*>(out.h);
+        if (at && ev && MemOk(reinterpret_cast<uintptr_t>(ev), 0x188, true) && *reinterpret_cast<u32*>(ev + 0x20) == out.x) {
+            *reinterpret_cast<float*>(ev + 0xa8) = at->x;
+            *reinterpret_cast<float*>(ev + 0xac) = at->y;
+            *reinterpret_cast<float*>(ev + 0xb0) = at->z;
+            *reinterpret_cast<float*>(ev + 0xb4) = 1.0f;
+            *reinterpret_cast<float*>(ev + 0xb8) = 1.0f;
+            *reinterpret_cast<float*>(ev + 0xbc) = 1.0f;
+            *reinterpret_cast<u32*>(ev + 0x184) |= 4;
+        }
         return true;
     }
 
@@ -2826,8 +2847,26 @@ namespace sl {
         u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
         return a30 ? *reinterpret_cast<uintptr_t*>(a30 + 0x18) : 0;
     }
+    /* The editor cursor's XLink objects, noted whenever the game looks up one of the editor's own
+       keywords (hovering / grabbing something): the sound one (SLink) finds it, the effect one
+       (ELink) doesn't. An XLink object sits 0x100 after its lookup context (checked: obj+0x30 ->
+       +0x18 is the context again). */
+    static uintptr_t s_EditSCtx = 0, s_EditECtx = 0;
+    static u8* XObjOfCtx(uintptr_t ctx) {
+        if (!ctx || !MemOk(ctx + 0x100, 0x38, false)) return nullptr;
+        u8* obj = reinterpret_cast<u8*>(ctx + 0x100);
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        if (!a30 || !MemOk(reinterpret_cast<uintptr_t>(a30), 0x20, false)) return nullptr;
+        return XCtxOf(obj) == ctx ? obj : nullptr;
+    }
     void XRecSearch(void* ctx, const char* name, void* asset) {
-        if (!s_XRecord.load(std::memory_order_relaxed) || !name || !IsEditKeyword(name)) return;
+        if (!name) return;
+        bool edit = EditorMap() && LiveLayout(s_EditLayout) && (u8)name[0] >= 0x80 && IsEditKeyword(name);
+        if (edit) {
+            if (asset) s_EditSCtx = (uintptr_t)ctx;
+            else s_EditECtx = (uintptr_t)ctx;
+        }
+        if (!s_XRecord.load(std::memory_order_relaxed) || !edit) return;
         u32 i = s_XSearchN.fetch_add(1) & 255;
         s_XSearch[i].ctx = (uintptr_t)ctx;
         s_XSearch[i].asset = (uintptr_t)asset;
@@ -2852,9 +2891,18 @@ namespace sl {
     static void RunPendingEmit() {
         if (!s_EmitPending.load(std::memory_order_acquire)) return;
         s_XRecord.store(0);   /* (our own emit isn't recorded) */
-        bool ok = XLinkEmit(reinterpret_cast<u8*>(s_EmitObj), s_EmitName);
+        Vec3f at = {};
+        if (LiveLayout(s_EditLayout)) at = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        bool ok = XLinkEmit(reinterpret_cast<u8*>(s_EmitObj), s_EmitName, &at);
         Log("xlink: emit '%s' on %lx -> %s", s_EmitName, (unsigned long)s_EmitObj, ok ? "found + emitted" : "keyword not found");
         s_EmitPending.store(0, std::memory_order_release);
+    }
+
+    /* The editor's own effects / sounds for our actions (names from the FtrEditCursor users, auditioned
+       on a Switch: the sound plays; effects need a position). */
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at) {
+        if (effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, effect, &at); }
+        if (sound) { if (u8* so = XObjOfCtx(s_EditSCtx)) XLinkEmit(so, sound, &at); }
     }
 
     /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
@@ -3324,6 +3372,7 @@ namespace sl {
             { "main", exl::util::modules::GetTargetStart() }, { "cam", (uintptr_t)s_DbgCam },
             { "player", (uintptr_t)s_LocalPlayer }, { "layout", (uintptr_t)s_EditLayout },
             { "recs", (uintptr_t)BuildingRecords() }, { "xowner", (uintptr_t)s_XOwner }, { "xarea", (uintptr_t)s_XArea },
+            { "xe", (uintptr_t)XObjOfCtx(s_EditECtx) }, { "xs", (uintptr_t)XObjOfCtx(s_EditSCtx) },
             { "mod", exl::util::modules::GetSelfStart() },
         };
         for (auto& n : names) {
@@ -3583,7 +3632,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx3 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx4 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
