@@ -1310,8 +1310,16 @@ namespace sl {
                 Log("structures: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
             } else if (y && !s_YWas) {
                 if (RemoveStructure(body)) s_HoverHandle = 0;
-            } else if (zl && !s_ZlWas) ReshapeStructure(body, true, false);
-            else ReshapeStructure(body, false, true);
+            } else {
+                /* at most one turn / resize per 0.35 s: holding the button turned the bridge ~50 times
+                   (the hidden presses read as new ones) */
+                static s64 s_LastReshape = 0;
+                if (NowTick() - s_LastReshape >= MsTicks(350)) {
+                    s_LastReshape = NowTick();
+                    if (zl && !s_ZlWas) ReshapeStructure(body, true, false);
+                    else ReshapeStructure(body, false, true);
+                }
+            }
         }
         if (!y) s_Hiding[0] = false;
         if (!zl) s_Hiding[1] = false;
@@ -2669,7 +2677,7 @@ namespace sl {
             *reinterpret_cast<u16*>(raw + 2) * 5, *reinterpret_cast<u16*>(raw + 4) * 5);
         SpawnRecordActor(slot);
         s_ShapePending |= 1ull << slot;
-        PlayEditFx("道造成煙：四角", "家具をはなす", *c);   /* a puff + the "put down" sound */
+        PlayEditFx("道造成煙：四角", "道造成煙：四角", *c);   /* the path tool's puff, with its own sound */
         return true;
     }
 
@@ -2764,7 +2772,7 @@ namespace sl {
         s_ShapePending |= 1ull << idx;
         Log("structures: record %d %s -> rotation %d id %x", (int)idx, rotate ? "turned" : "resized", r[3], r[4]);
         if (rotate) PlayEditFx(nullptr, "90度回転させる", at);
-        else PlayEditFx("道造成煙：角丸", "橋坂外観変更", at);
+        else PlayEditFx("道造成煙：角丸", "橋坂外観変更", at);   /* (auditioned on a Switch, all approved) */
         return true;
     }
 
@@ -2797,7 +2805,7 @@ namespace sl {
         /* every actor of this record, not just the one under the cursor: a building that was just
            moved still has its old actor for a moment, which stayed visible and needed more presses */
         Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
-        PlayEditFx("道造成消失煙", "しまう", at);   /* the path tool's vanishing smoke + "put away" */
+        PlayEditFx("道造成消失煙", "道造成消失煙", at);   /* the path tool's vanishing smoke + its sound ("put away" was a faint click) */
         DeleteActorsOfRecord((int)idx);   /* (includes <body>; deleting one twice isn't safe) */
         u8 zero[0x14] = {};
         WriteRecord((int)idx, zero);
@@ -3684,7 +3692,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx7 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx8 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
