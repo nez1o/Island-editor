@@ -920,6 +920,7 @@ namespace sl {
     /* Held like furniture: while a building / bridge is held it bobs gently and glides to each new
        cell instead of jumping (a visual offset on top of the real position, undone before anything
        reads or changes it for real). */
+    float s_SquareDy = 0.0f;   /* square height vs the ground, live-tunable (sl::s_SquareDy): it drew over buildings */
     static BldComp* s_HeldComp = nullptr;
     static float s_DragOffX = 0, s_DragOffZ = -5.0f;
     static void SquareOffset(u8* body, float* ox, float* oz);
@@ -959,7 +960,7 @@ namespace sl {
            structure, not the body (sizes / offsets changed nothing while this was body z - 5) */
         float ox, oz;
         SquareOffset(c->body, &ox, &oz);
-        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z + oz };
+        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f) + (c->grabbed ? 0.0f : s_SquareDy), p->z - hv.z + oz };
         return &c->pos;
     }
 
@@ -4065,7 +4066,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn23 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn24 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
