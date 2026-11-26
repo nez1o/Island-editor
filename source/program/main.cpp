@@ -999,19 +999,6 @@ namespace sl {
         float x = *reinterpret_cast<const float*>(pos + 8), z = *reinterpret_cast<const float*>(pos + 0x10) + 5.0f;
         float tx = RoundToStep(x - c->startX, 5.0f);
         float tz = RoundToStep(z - c->startZ, 5.0f);
-        if (int k = StructureOfBody(c->body)) {
-            /* bridges / inclines move in whole tiles, lined up so their square (odd sizes sit on a tile
-               middle, even ones on a tile line) can centre on them: at half-tile spots it couldn't */
-            float hx, hz, ox, oz;
-            SquareDims(c->body, k == 26 ? 1 : 2, &hx, &hz, &ox, &oz);
-            auto snap = [](float start, float t, float o, float half) {
-                float rem = (((int)(half / 5.0f + 0.5f)) & 1) ? 5.0f : 0.0f;
-                float cpos = start + t + o - rem;
-                return RoundToStep(cpos, 10.0f) + rem - start - o;
-            };
-            tx = snap(c->startX, tx, ox, hx);
-            tz = snap(c->startZ, tz, oz, hz);
-        }
         if (tx == c->dx && tz == c->dz) return;
         ShiftParts(c, tx - c->dx, tz - c->dz);
         if (c == s_HeldComp) {   /* looks like it stays put, then glides over */
@@ -1078,6 +1065,8 @@ namespace sl {
     bool SpawnBusy();
     static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && (StructureOfBody(c->body) || RemovableBuildingOfBody(c->body)) ? 1 : 0; }
 
+    static void BldRectFullOurs(BldComp* c, u8* out, const u8* pos);
+    static void BldRectMinOurs(BldComp* c, u8* out, const u8* pos);
     static void InitBldVtable() {
         if (s_BldVt[0]) return;
         const uintptr_t* game = reinterpret_cast<const uintptr_t*>(Main(BldCompVtable));
@@ -1091,6 +1080,8 @@ namespace sl {
         s_BldVt[0x70 / 8] = reinterpret_cast<const void*>(&BldValid);
         s_BldVt[0x78 / 8] = reinterpret_cast<const void*>(&BldDrop);
         s_BldVt[0xb0 / 8] = reinterpret_cast<const void*>(&BldCanRemove);
+        s_BldVt[0xd0 / 8] = reinterpret_cast<const void*>(&BldRectMinOurs);
+        s_BldVt[0xd8 / 8] = reinterpret_cast<const void*>(&BldRectFullOurs);
     }
 
     static bool CompInUse(BldComp& c) {
@@ -1463,6 +1454,39 @@ namespace sl {
         for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
         *hxOut = hx; *hzOut = hz; *oxOut = ox; *ozOut = oz;
     }
+    /* The square in 5-unit cells straight from the structure (half-tile spots too): the game's own rect
+       (0x2a85468) snaps to whole tiles, so at half-tile spots it sat half a tile off. Used for the
+       comp's rect slots 0xd8 (full: +0x10 x0, +0x14 z0, +0x20 x1, +0x24 z1) and 0xd0 (min: +8 x0, +0xc z0). */
+    static bool SquareCells(BldComp* c, s32* x0, s32* z0, s32* x1, s32* z1) {
+        if (!c || !c->body || c->state) return false;
+        Vec3f sp;
+        if (SpawnPosFor(c->body, &sp)) return false;   /* the borrowed spawn house: the game's own (tiny) one */
+        int k = StructureOfBody(c->body);
+        int fk = k == 26 ? 1 : k == 27 ? 2 : 0;
+        float hx, hz, ox, oz;
+        SquareDims(c->body, fk, &hx, &hz, &ox, &oz);
+        Vec3f p = *reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
+        if (c == s_HeldComp) { p.x -= s_HeldV.x; p.z -= s_HeldV.z; }
+        auto tiles = [](float half) { s32 n = (s32)(half / 5.0f + 0.5f); return n < 1 ? 1 : n > 5 ? 5 : n; };
+        s32 w = tiles(hx), d = tiles(hz);
+        auto cell = [](float v) { return (s32)__builtin_floorf(v / 5.0f + 0.5f); };
+        *x0 = cell(p.x + ox - 5.0f * w); *x1 = *x0 + 2 * w - 1;
+        *z0 = cell(p.z + oz - 5.0f * d); *z1 = *z0 + 2 * d - 1;
+        return true;
+    }
+    static void BldRectFullOurs(BldComp* c, u8* out, const u8* pos) {
+        reinterpret_cast<void (*)(BldComp*, u8*, const u8*)>(Main(BldRectFull))(c, out, pos);
+        s32 x0, z0, x1, z1;
+        if (!out || !SquareCells(c, &x0, &z0, &x1, &z1)) return;
+        *reinterpret_cast<s32*>(out + 0x10) = x0; *reinterpret_cast<s32*>(out + 0x14) = z0;
+        *reinterpret_cast<s32*>(out + 0x20) = x1; *reinterpret_cast<s32*>(out + 0x24) = z1;
+    }
+    static void BldRectMinOurs(BldComp* c, u8* out, const u8* pos) {
+        reinterpret_cast<void (*)(BldComp*, u8*, const u8*)>(Main(BldRectMin))(c, out, pos);
+        s32 x0, z0, x1, z1;
+        if (!out || !SquareCells(c, &x0, &z0, &x1, &z1)) return;
+        *reinterpret_cast<s32*>(out + 8) = x0; *reinterpret_cast<s32*>(out + 0xc) = z0;
+    }
     static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
         const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
         {   /* which body / record the square is for, once per change (inclines didn't take their size) */
@@ -1557,9 +1581,8 @@ namespace sl {
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
             *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
-        using RectFn = void (*)(BldComp*, u8*, void*);
-        if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
-        if (minOut) reinterpret_cast<RectFn>(Main(BldRectMin))(c, minOut, &at);
+        if (out) BldRectFullOurs(c, out, reinterpret_cast<const u8*>(&at));
+        if (minOut) BldRectMinOurs(c, minOut, reinterpret_cast<const u8*>(&at));
         return *reinterpret_cast<u32*>(body + 0x230);
     }
 
@@ -3010,7 +3033,7 @@ namespace sl {
     struct Shrinking { u32 h; int f; float y; };
     static Shrinking s_Shrink[8];
     static int s_ShrinkCount = 0;
-    constexpr int ShrinkFrames = 8;   /* 12 was a bit slow (sai) */
+    constexpr int ShrinkFrames = 6;   /* 12, then 8, were a bit slow (sai) */
     static void ShrinkActorsOfRecord(int idx) {
         using DelFn = void (*)(u8*);
         ForEachActor([&](u8* a) {
@@ -3963,7 +3986,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn13 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn14 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
