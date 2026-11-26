@@ -960,7 +960,7 @@ namespace sl {
            structure, not the body (sizes / offsets changed nothing while this was body z - 5) */
         float ox, oz;
         SquareOffset(c->body, &ox, &oz);
-        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f) + (c->grabbed ? 0.0f : s_SquareDy), p->z - hv.z + oz };
+        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z + oz };
         return &c->pos;
     }
 
@@ -1620,7 +1620,9 @@ namespace sl {
         u32 item[2] = { 0xfffe, 0 };
         reinterpret_cast<void (*)(u32*)>(Main(ItemNoneInit))(item);
         *reinterpret_cast<float*>(query + 0x28) = (x0 * 5.0f + x1 * 5.0f + 5.0f) * 0.5f;
-        *reinterpret_cast<float*>(query + 0x2c) = 0;
+        /* height of the highlight: was 0 (under the cliff-level ground at 15); the body's height +
+           s_SquareDy (live-tunable) - sai: the square drew over the building */
+        *reinterpret_cast<float*>(query + 0x2c) = reinterpret_cast<const Vec3f*>(body + 0x7f0)->y + s_SquareDy;
         *reinterpret_cast<float*>(query + 0x30) = (z0 * 5.0f + z1 * 5.0f + 5.0f) * 0.5f;
         *reinterpret_cast<u32*>(query + 0x34) = rot;
         *reinterpret_cast<u32*>(query + 0x38) = 0;
@@ -4066,7 +4068,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn24 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn25 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
