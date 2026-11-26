@@ -3,18 +3,20 @@
 # the module's spawn menu there, so the left slot gets a lit arrow and a "spawn" icon (a bridge with
 # a plus), drawn here from simple shapes (no game art).
 #
-# How the slot works (found in the dump): animation InteriorWherearenIslands_KeyLeft (2 frames, step
-# keys) picks what the left slot shows in N_TypeInside_05 (the D-pad guide the island editor uses):
-#   frame 0: N_KeyLeftOff_00 (grey arrow)          <- the island editor
-#   frame 1: N_KeyLeft_00 (lit arrow P_JujiL_03 + icon P_InteriorModePlus_00, HHP interiors)
-# Changes:
-#   - bflyt: new texture IconSpawnDpad^s in txl1; material P_InteriorModePlus_00 uses it by default;
-#     N_KeyLeft_00 visible and N_KeyLeftOff_00 hidden by default (in case the animation isn't bound)
-#   - KeyLeft animation: N_KeyLeft_00 shown at frames 0-1, N_KeyLeftOff_00 hidden; a texture pattern
-#     (FLTP) on material P_InteriorModePlus_00: frame 0 spawn icon, frame 1 the game's own icon
-#   - bntx: the new texture (BC4 128x128, a mask the layout tints, like IconCatInteriorPlus^s)
-# Side effect: anywhere else frame 0 shows (HHP interiors before the "plus" mode is unlocked), the
-# spawn icon shows too.
+# How the slot works (found in the dump, checked live on a Switch): animation
+# InteriorWherearenIslands_KeyLeft (3 frames, step keys; the game re-applies it, a poke of the pane's
+# visible bit was undone) picks what the left slot shows. Two D-pad guide variants:
+#   N_TypeInside_05 (HHP interiors): frame 0 grey arrow N_KeyLeftOff_00, frame 1 N_KeyLeft_00 (lit
+#     arrow + P_InteriorModePlus_00)
+#   N_Type_06 (exteriors, what the island editor shows on the main island; sun icon on top):
+#     frame 0 nothing lit, frame 2 N_KeyLeft_02 (lit arrow P_JujiL_06 + P_Season_00, HHP seasons)
+# The island editor runs at frame 0. Changes, for both variants:
+#   - frame 0 shows the lit slot (N_KeyLeft_00 / N_KeyLeft_02), its icon gets a texture pattern (FLTP)
+#     frame 0 = new IconSpawnDpad^s, other frames = the game's own icon; the icon panes join group
+#     G_KeyLeft_00 (the animation binds through it); layout defaults match frame 0
+#   - bntx: the new texture (BC4 128x128, a mask the layout tints, like the game's icons)
+# Side effect: anywhere else frame 0 shows (HHP interiors before "plus" mode is unlocked, HHP
+# exteriors before seasons are), the spawn icon shows too.
 #
 # usage (standalone): python3 tools/dpad_icon.py <RomFS dir> <out romfs dir> [preview.png]
 #   writes <out>/Layout/InteriorWherearenIslands.Nin_NX_NVN.zs and raises its entry in
@@ -29,8 +31,10 @@ import bflan, bntx_write, bc4, swz, bridge_icons
 
 LAYOUT = 'InteriorWherearenIslands'
 TEXTURE = 'IconSpawnDpad^s'
-TEMPLATE = 'IconCatInteriorPlus^s'
-MATERIAL = 'P_InteriorModePlus_00'
+TEMPLATE = 'IconCatInteriorPlus^s'      # format / size template for the new texture
+# (lit slot pane, its icon pane = material, the game's icon texture, frame where the game shows it)
+SLOTS = [('N_KeyLeft_00', 'P_InteriorModePlus_00', 'IconCatInteriorPlus^s', 1),
+         ('N_KeyLeft_02', 'P_Season_00', 'GuideIconSeasons^s', 2)]
 
 
 def zs_read(path):
@@ -93,7 +97,6 @@ def patch_layout(body):
     assert TEXTURE.encode() not in names
     names.append(TEXTURE.encode())
     tex_index = len(names) - 1
-    tmpl_index = names.index(TEMPLATE.encode())
     table = bytearray(); strings = bytearray()
     for nm in names:
         table += struct.pack('<I', 4 * len(names) + len(strings))
@@ -102,26 +105,39 @@ def patch_layout(body):
     sec += b'\0' * (-len(sec) % 4)
     struct.pack_into('<I', sec, 4, len(sec))
     body[p:p + sz] = sec
-    # mat1: P_InteriorModePlus_00's first texture map (u16 index right after the 0x10 bytes of
-    # flags / colours that follow the 0x1c name) -> the new texture
+    # mat1: each icon's first texture map (u16 index right after the 0x10 bytes of flags / colours
+    # that follow the 0x1c name) -> the new texture
     (p, sz), = [(p, sz) for t, p, sz in sections(body) if t == b'mat1']
     n = struct.unpack_from('<H', body, p + 8)[0]
+    done = set()
     for i in range(n):
         o = p + struct.unpack_from('<I', body, p + 0xc + 4 * i)[0]
-        if bytes(body[o:o + 0x1c]).split(b'\0')[0] == MATERIAL.encode():
-            assert struct.unpack_from('<H', body, o + 0x2c)[0] == tmpl_index
-            struct.pack_into('<H', body, o + 0x2c, tex_index)
-            break
-    else:
-        raise ValueError(MATERIAL + ' material not found')
-    # default visibility (pane flag byte +8, bit 0)
+        mname = bytes(body[o:o + 0x1c]).split(b'\0')[0].decode()
+        for _slot, mat, tex, _f in SLOTS:
+            if mname == mat:
+                assert struct.unpack_from('<H', body, o + 0x2c)[0] == names.index(tex.encode()), mat
+                struct.pack_into('<H', body, o + 0x2c, tex_index)
+                done.add(mat)
+    assert done == {m for _s, m, _t, _f in SLOTS}, done
+    # default visibility (pane flag byte +8, bit 0), as at frame 0
     seen = set()
     for t, p, sz in sections(body):
         if t != b'pan1': continue
         name = bytes(body[p + 0xc:p + 0x24]).split(b'\0')[0].decode()
-        if name == 'N_KeyLeft_00': body[p + 8] |= 1; seen.add(name)
+        if name in [sl for sl, *_ in SLOTS]: body[p + 8] |= 1; seen.add(name)
         if name == 'N_KeyLeftOff_00': body[p + 8] &= ~1; seen.add(name)
-    assert len(seen) == 2, seen
+    assert len(seen) == len(SLOTS) + 1, seen
+    # group G_KeyLeft_00 (grp1: name[0x22], u16 count, names[24]): add the icon panes
+    for t, g, gsz in sections(body):
+        if t == b'grp1' and bytes(body[g + 8:g + 0x2a]).split(b'\0')[0] == b'G_KeyLeft_00':
+            cnt = struct.unpack_from('<H', body, g + 0x2a)[0]
+            add = b''.join(m.encode().ljust(24, b'\0') for _s, m, _t, _f in SLOTS)
+            body[g + gsz:g + gsz] = add
+            struct.pack_into('<H', body, g + 0x2a, cnt + len(SLOTS))
+            struct.pack_into('<I', body, g + 4, gsz + len(add))
+            break
+    else:
+        raise ValueError('G_KeyLeft_00 not found')
     struct.pack_into('<I', body, 0xc, len(body))
     return bytes(body)
 
@@ -131,16 +147,18 @@ def patch_key_left(data):
     a = bflan.read(data)
     pai = [s for mg, s in a['sections'] if mg == b'pai1'][0]
     assert pai['frames'] == 2 and not pai['textures']
+    keys = {'N_KeyLeft_00': [(0.0, 1), (2.0, 0)],             # was 0 / 1 / 0
+            'N_KeyLeftOff_00': [(0.0, 0)],                      # was 1 / 0
+            'N_KeyLeft_02': [(0.0, 1), (1.0, 0), (2.0, 1)]}     # was - / 0 / 1
     done = set()
     for e in pai['entries']:
-        if e['name'] == 'N_KeyLeft_00':
-            e['tags'][0]['infos'][0]['keys'] = [(0.0, 1), (2.0, 0)]; done.add(e['name'])
-        if e['name'] == 'N_KeyLeftOff_00':
-            e['tags'][0]['infos'][0]['keys'] = [(0.0, 0)]; done.add(e['name'])
-    assert len(done) == 2, done
-    pai['textures'] = [TEXTURE, TEMPLATE]
-    pai['entries'].append(dict(name=MATERIAL, kind=1, tags=[dict(tag='FLTP', infos=[
-        dict(index=0, target=0, curve=1, keys=[(0.0, 0), (1.0, 1)])])]))
+        if e['name'] in keys:
+            e['tags'][0]['infos'][0]['keys'] = keys[e['name']]; done.add(e['name'])
+    assert done == set(keys), done
+    pai['textures'] = [TEXTURE] + [tex for _s, _m, tex, _f in SLOTS]
+    for i, (_s, mat, _tex, _f) in enumerate(SLOTS):
+        pai['entries'].append(dict(name=mat, kind=1, tags=[dict(tag='FLTP', infos=[
+            dict(index=0, target=0, curve=1, keys=[(0.0, 0), (1.0, i + 1)])])]))
     return bflan.write(a)
 
 
