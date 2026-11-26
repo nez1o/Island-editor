@@ -1472,6 +1472,7 @@ namespace sl {
             if (((lo & 1) != 0) != odd) lo--;
             if (((hi & 1) != 0) != odd) hi++;
             if (lo < 1) return hi;
+            if (hi > 5) return lo;                         /* the game draws no square wider than 5 tiles (sai's house at 6) */
             return raw - lo < hi - raw ? lo : hi;
         };
         s32 w = pick(hx, cx), dz = pick(hz, cz);
@@ -3942,7 +3943,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn10 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn11 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
