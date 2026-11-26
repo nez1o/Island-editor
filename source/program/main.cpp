@@ -1878,6 +1878,7 @@ namespace sl {
             r.frames++;
             u8* nb = ActorOfHandle(r.newBody);
             bool ready = r.frames >= 150;
+            if (nb && r.frames >= 2 && StructureOfBody(nb)) ready = true;   /* a bridge / incline is its body alone: a duplicate showed for ~3 s */
             if (nb && r.frames >= 4) {
                 const Vec3f b = *reinterpret_cast<const Vec3f*>(nb + 0x7f0);
                 int fresh = 0;
@@ -2920,9 +2921,14 @@ namespace sl {
     void XRecSearch(void* ctx, const char* name, void* asset) {
         if (!name) return;
         bool edit = EditorMap() && LiveLayout(s_EditLayout) && (u8)name[0] >= 0x80 && IsEditKeyword(name);
+        /* the first ones of an editor session are kept while they're alive: later lookups of these
+           keywords also come from other objects (a hovered bridge), and sounds sent to those went
+           nowhere once the bridge was rebuilt or removed (Switch: no turn / resize / remove sounds) */
         if (edit) {
-            if (asset) s_EditSCtx = (uintptr_t)ctx;
-            else s_EditECtx = (uintptr_t)ctx;
+            static u8* s_CtxLayout = nullptr;   /* a new editor session: capture again */
+            if (s_CtxLayout != s_EditLayout) { s_CtxLayout = s_EditLayout; s_EditSCtx = s_EditECtx = 0; }
+            if (asset) { if (!XObjOfCtx(s_EditSCtx)) s_EditSCtx = (uintptr_t)ctx; }
+            else if (!XObjOfCtx(s_EditECtx)) s_EditECtx = (uintptr_t)ctx;
         }
         if (!s_XRecord.load(std::memory_order_relaxed) || !edit) return;
         u32 i = s_XSearchN.fetch_add(1) & 255;
@@ -3716,7 +3722,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx10 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx11 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
