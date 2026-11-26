@@ -3,7 +3,8 @@
 #   picture(i) -> 300x300 rows of RGBA (a 60x60 drawing scaled 5x, nearest), for the cell pictures
 #                 (Model/Layout_HouseShapeIcon_H<i>, packed by bridges_tab.py)
 #   tab_icon(size) -> 0-255 mask (the layout tints it, like the game's IconCat* tab icons)
-# Order = k_BuildingCells in main.cpp: Nook's Cranny, Museum, Resident Services, Able Sisters, Campsite.
+# Order = k_BuildingCells in main.cpp: Nook's Cranny, Museum, Resident Services, Able Sisters, Campsite,
+# Redd's boat, tent, studio, hotel, empty house.
 #
 # usage: python3 tools/building_icons.py <preview.png>   (all pictures side by side + the tab icon)
 import math
@@ -11,7 +12,8 @@ import math
 N = 60          # drawing size in pixels
 SCALE = 5       # -> 300x300
 
-NAMES = ["Nook's Cranny", 'Museum', 'Resident Services', 'Able Sisters', 'Campsite']
+NAMES = ["Nook's Cranny", 'Museum', 'Resident Services', 'Able Sisters', 'Campsite',
+         "Redd's boat", 'Tent', 'Studio', 'Hotel', 'Empty house']
 
 OUT = (70, 50, 36, 255)        # outline
 SHADOW = (0, 0, 0, 40)
@@ -155,7 +157,69 @@ def campsite():
     return g
 
 
-DRAW = [cranny, museum, services, sisters, campsite]
+def redd():
+    g = new()
+    water, foam = (90, 160, 210, 255), (220, 240, 250, 255)
+    rect(g, 0, 46, N - 1, 56, water)
+    for x in range(2, N, 6): rect(g, x, 46, x + 2, 46, foam)
+    hull = (120, 70, 140, 255)
+    for i, y in enumerate(range(34, 46)):                             # purple hull, narrower at the bottom
+        rect(g, 6 + i // 2, y, 53 - i // 2, y, hull)
+        put(g, 6 + i // 2, y, OUT); put(g, 53 - i // 2, y, OUT)
+    rect(g, 6, 34, 53, 34, OUT)
+    rect(g, 8, 37, 51, 38, (240, 200, 80, 255))                       # gold stripe
+    box(g, 20, 20, 39, 34, (236, 200, 140, 255))                      # cabin
+    window(g, 23, 23, 6, 6); window(g, 31, 23, 6, 6)
+    gable(g, 29, 12, 12, 20, (200, 60, 70, 255))                      # red roof
+    box(g, 44, 8, 46, 34, (150, 100, 60, 255))                        # mast + flag
+    gable(g, 50, 8, 4, 14, (240, 200, 80, 255))
+    return g
+
+
+def tent():
+    g = new(); ground(g)
+    gable(g, 29, 14, 24, 54, (120, 170, 90, 255))                     # green tent
+    gable(g, 29, 30, 8, 54, (70, 50, 36, 255))                        # opening
+    rect(g, 29, 14, 29, 29, OUT)
+    box(g, 4, 50, 8, 54, (150, 100, 60, 255)); box(g, 51, 50, 55, 54, (150, 100, 60, 255))   # pegs
+    return g
+
+
+def studio():
+    g = new(); ground(g)
+    box(g, 8, 24, 51, 54, (245, 240, 230, 255))                       # white walls
+    roof(g, 8, 51, 14, 24, (60, 60, 70, 255))                         # dark roof
+    box(g, 20, 30, 39, 44, (40, 40, 50, 255))                         # camera body
+    box(g, 25, 33, 34, 42, (120, 170, 220, 255))                      # lens
+    rect(g, 28, 36, 31, 39, (40, 40, 50, 255))
+    box(g, 34, 27, 38, 30, (220, 60, 60, 255))                        # flash
+    door(g, 42, 40, 7, 14, (90, 90, 100, 255))
+    return g
+
+
+def hotel():
+    g = new(); ground(g)
+    box(g, 12, 10, 47, 54, (240, 220, 180, 255))                      # tall building
+    roof(g, 12, 47, 4, 10, (200, 90, 60, 255), overhang=1)
+    for y in (14, 24, 34):
+        for x in (16, 26, 36): window(g, x, y, 6, 6)
+    box(g, 21, 44, 38, 54, (200, 90, 60, 255))                        # entrance awning
+    door(g, 25, 46, 9, 8, (150, 95, 55, 255))
+    return g
+
+
+def empty_house():
+    g = new(); ground(g)
+    box(g, 12, 28, 47, 54, (230, 210, 180, 255))                      # plain walls
+    gable(g, 29, 10, 22, 28, (170, 150, 130, 255))                    # plain roof
+    door(g, 24, 38, 11, 16, (170, 130, 90, 255))
+    box(g, 38, 40, 50, 48, (250, 245, 230, 255))                      # "for sale" sign
+    rect(g, 40, 43, 48, 44, (200, 60, 60, 255))
+    box(g, 43, 48, 45, 54, (150, 100, 60, 255))
+    return g
+
+
+DRAW = [cranny, museum, services, sisters, campsite, redd, tent, studio, hotel, empty_house]
 
 
 def picture(i):
