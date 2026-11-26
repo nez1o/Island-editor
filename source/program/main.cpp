@@ -1364,6 +1364,8 @@ namespace sl {
         }
     }
 
+    struct FootTune { s32 tx, tz; float dx, dy, dz; };
+    FootTune s_Foot[3] = { { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         s_CursorQueryTick = NowTick();
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
@@ -1398,11 +1400,16 @@ namespace sl {
         if (!c) return 0;
         /* the borrowed house's footprint (4x4 tiles) showed as a big square at the cursor for a moment
            when D-pad left was pressed (Switch video): one tile while it's only borrowed */
-        s32 tiles = body == s_SpawnBody && (s_SpawnArmed || s_SpawnMode) ? 0 : 3;
-        *reinterpret_cast<s32*>(c->owner + 0x5b8) = tiles;
-        *reinterpret_cast<s32*>(c->owner + 0x5bc) = tiles;
+        /* Footprint (last tile index in x / z) and the square's offset per kind, tunable live with dbg
+           poke (sl::s_Foot): [0] houses / shops, [1] bridges, [2] inclines. */
+        int fk = StructureOfBody(body) == 26 ? 1 : StructureOfBody(body) == 27 ? 2 : 0;   /* 26 bridge, 27 incline */
+        bool borrowed = body == s_SpawnBody && (s_SpawnArmed || s_SpawnMode);
+        *reinterpret_cast<s32*>(c->owner + 0x5b8) = borrowed ? 0 : s_Foot[fk].tx;
+        *reinterpret_cast<s32*>(c->owner + 0x5bc) = borrowed ? 0 : s_Foot[fk].tz;
+        Vec3f fp = *BldPos(c);
+        if (!borrowed) { fp.x += s_Foot[fk].dx; fp.y += s_Foot[fk].dy; fp.z += s_Foot[fk].dz; }
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
-            *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, *BldPos(c),
+            *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
         using RectFn = void (*)(BldComp*, u8*, void*);
         if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
@@ -3772,7 +3779,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn2 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn3 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
