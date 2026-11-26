@@ -1321,6 +1321,27 @@ namespace sl {
         return body;
     }
 
+    /* Quick start (sai: "skip the game opening"): from boot until the player is first on the island,
+       A is pressed for you (100 ms every 600 ms, from 3 s after boot, at most 3 minutes): the title
+       screen and the notices after it go by without waiting. Off with quick_start=0. */
+    static bool s_QuickStart = true;   /* toggles.txt "quick_start" */
+    void QuickStartPad(void* states, int count) {
+        static s64 s_Boot = 0;
+        static bool s_Done = false;
+        if (s_Done || !states || count <= 0) return;
+        s64 now = NowTick();
+        if (!s_Boot) s_Boot = now;
+        if (s_LocalPlayer || !s_QuickStart || now - s_Boot > MsTicks(180000)) {
+            s_Done = true;
+            Log("quick start: done (%s)", s_LocalPlayer ? "on the island" : !s_QuickStart ? "off" : "timed out");
+            return;
+        }
+        s64 t = now - s_Boot - MsTicks(3000);
+        if (t < 0 || t % MsTicks(600) >= MsTicks(100)) return;
+        u8* s = reinterpret_cast<u8*>(states);
+        for (int i = 0; i < count && i < 16; i++) *reinterpret_cast<u64*>(s + i * 0x28 + 8) |= 1ull;
+    }
+
     /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
     void EditorPad(void* states, int count) {
         if (!states || count <= 0 || !EditorMap() || s_EditClosing) return;
@@ -3538,6 +3559,8 @@ namespace sl {
                             g_Features[i].key, g_Features[i].wanted ? 1 : 0, g_Features[i].label);
         len += snprintf(buf + len, sizeof(buf) - len, "terraform_speed=%d    # animation speed while terraforming (1-60)\n",
                         (int)s_TerraformSpeed);
+        len += snprintf(buf + len, sizeof(buf) - len, "quick_start=%d    # press A for you on the title screen until you're on the island\n",
+                        s_QuickStart ? 1 : 0);
         len += snprintf(buf + len, sizeof(buf) - len,
                         "app_flip_y=%d    # Slumber app screen: -1 auto; 1 or 0 if it shows upside down\n", app::FlipOverride());
         if (!s_SdReady) return;
@@ -3579,6 +3602,10 @@ namespace sl {
                         app::SetFlipOverride(flip);
                         Log("app_flip_y = %d", flip);
                     }
+                }
+                if (strcmp(line, "quick_start") == 0) {
+                    bool on = eq[1] != '0';
+                    if (on != s_QuickStart) { s_QuickStart = on; Log("quick_start = %d", on ? 1 : 0); }
                 }
                 if (strcmp(line, "terraform_speed") == 0) {
                     int v = 0;
@@ -4036,7 +4063,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn20 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn21 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -4778,6 +4805,7 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadDetail##type) {                                               \
         static int Callback(int* written, void* states, int count, const u32& id) {          \
             int r = Orig(written, states, count, id);                                        \
+            sl::QuickStartPad(states, count);                                \
             sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
             return r;                                                                        \
@@ -4786,6 +4814,7 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadStates##type) {                                               \
         static void Callback(void* states, int count, const u32& id) {                       \
             Orig(states, count, id);                                                         \
+            sl::QuickStartPad(states, count);                                \
             sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
         }                                                                                    \
@@ -4793,6 +4822,7 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadState##type) {                                                \
         static void Callback(void* state, const u32& id) {                                   \
             Orig(state, id);                                                                 \
+            sl::QuickStartPad(state, 1);                                       \
             sl::EditorPad(state, 1);                                           \
             sl::app::OnNpadStates(state, 1);                                                 \
         }                                                                                    \
