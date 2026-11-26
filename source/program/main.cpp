@@ -908,7 +908,7 @@ namespace sl {
     static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
     static int RemovableBuildingOfBody(u8* body);   /* a spawned shop / service copy: its type, else 0 */
     /* Buildings tab cells (tab 7, see RemovableBuildingOfBody) */
-    static const s16 k_BuildingCells[] = { 19, 21, 20, 24, 25, 28, 23, 29, 42, 9 };   /* Cranny, Museum, Resident Services, Able Sisters, Campsite, Redd, tent, studio, hotel, empty house */
+    s16 k_BuildingCells[] = {   /* not const: dbg pokes a type into a cell to try it */ 19, 21, 20, 24, 25, 28, 23, 29, 42, 9 };   /* Cranny, Museum, Resident Services, Able Sisters, Campsite, Redd, tent, studio, hotel, empty house */
     constexpr int BuildingCells = sizeof(k_BuildingCells) / sizeof(k_BuildingCells[0]);
 
     /* -- component slots (x0 = component) -- */
@@ -4095,7 +4095,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn28 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn29 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
