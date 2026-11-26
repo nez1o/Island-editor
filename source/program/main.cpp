@@ -919,7 +919,9 @@ namespace sl {
     static Vec3f* BldPos(BldComp* c) {
         Vec3f sp;
         if (SpawnPosFor(c->body, &sp)) {
-            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y, sp.z };
+            /* 100 under the ground: the editor's square / hand for the borrowed house showed at the
+               cursor for a moment when the spawn menu opened (Switch video) */
+            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y - 100.0f, sp.z };
             return &c->pos;
         }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
@@ -2971,7 +2973,9 @@ namespace sl {
     static void RunEditFx() {
         for (int i = 0; i < s_FxCount; i++) {
             const FxReq& r = s_FxQueue[i];
-            if (r.effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, r.effect, &r.at, 2.5f); }
+            /* 8 up: at the structure's middle the smoke looked like it came from underneath it */
+            Vec3f up = { r.at.x, r.at.y + 8.0f, r.at.z };
+            if (r.effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, r.effect, &up, 2.5f); }
             if (r.sound) {
                 u8* so = XObjOfCtx(s_EditSCtx);
                 if (so) XLinkEmit(so, r.sound);
@@ -3002,8 +3006,9 @@ namespace sl {
             float pt[3] = { p->x, 0.0f, p->z };
             float g = reinterpret_cast<HeightFn>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, pt, nullptr, 0);
             float dy = g - p->y;
-            if (dy > -0.3f && dy < 0.3f) return;
-            if (dy < -20.0f || dy > 20.0f) return;
+            /* only down (the beach): moving up lifted a house a little above the ground where the
+               ground under its middle is uneven (sai's house) */
+            if (dy > -0.3f || dy < -20.0f) return;
             snaps[n++] = { a, p->x, p->z, dy };
         });
         if (!n) return;
@@ -3711,7 +3716,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx9 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx10 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
