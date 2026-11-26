@@ -2806,7 +2806,16 @@ namespace sl {
 
     /* Recording of XLink keyword searches and emits (dbg "xlog"), to find which XLink object plays
        which keyword (the editor cursor's, for the effects / sounds above). */
-    struct XSearchRec { uintptr_t ctx; char name[48]; };
+    struct XSearchRec { uintptr_t ctx; char name[48]; uintptr_t asset; };
+    /* The editor's own keyword table (main+0x4a4c328, 37 names): only these are recorded, the rest of
+       the game searches ~150 keywords a second (footsteps, ripples...). */
+    constexpr u32 EditKeywordTable = 0x4a4c328;
+    constexpr int EditKeywordCount = 37;
+    static bool IsEditKeyword(const char* name) {
+        const char* const* t = reinterpret_cast<const char* const*>(Main(EditKeywordTable));
+        for (int i = 0; i < EditKeywordCount; i++) if (t[i] && strcmp(t[i], name) == 0) return true;
+        return false;
+    }
     struct XEmitRec { uintptr_t obj, ctx, asset; };
     static XSearchRec s_XSearch[256];
     static XEmitRec s_XEmit[256];
@@ -2817,17 +2826,23 @@ namespace sl {
         u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
         return a30 ? *reinterpret_cast<uintptr_t*>(a30 + 0x18) : 0;
     }
-    void XRecSearch(void* ctx, const char* name) {
-        if (!s_XRecord.load(std::memory_order_relaxed) || !name) return;
+    void XRecSearch(void* ctx, const char* name, void* asset) {
+        if (!s_XRecord.load(std::memory_order_relaxed) || !name || !IsEditKeyword(name)) return;
         u32 i = s_XSearchN.fetch_add(1) & 255;
         s_XSearch[i].ctx = (uintptr_t)ctx;
+        s_XSearch[i].asset = (uintptr_t)asset;
         strncpy(s_XSearch[i].name, name, sizeof(s_XSearch[i].name) - 1);
         s_XSearch[i].name[sizeof(s_XSearch[i].name) - 1] = 0;
     }
     void XRecEmit(u8* obj, void* q) {
-        if (!s_XRecord.load(std::memory_order_relaxed) || !obj) return;
+        if (!s_XRecord.load(std::memory_order_relaxed) || !obj || !q) return;
+        uintptr_t asset = *reinterpret_cast<uintptr_t*>(reinterpret_cast<u8*>(q) + 8);
+        u32 ns = s_XSearchN.load();
+        bool ours = false;
+        for (u32 k = (ns > 256 ? ns - 256 : 0); k < ns && !ours; k++) if (s_XSearch[k & 255].asset == asset) ours = true;
+        if (!ours) return;
         u32 i = s_XEmitN.fetch_add(1) & 255;
-        s_XEmit[i] = { (uintptr_t)obj, XCtxOf(obj), q ? *reinterpret_cast<uintptr_t*>(reinterpret_cast<u8*>(q) + 8) : 0 };
+        s_XEmit[i] = { (uintptr_t)obj, XCtxOf(obj), asset };
     }
 
     /* dbg "emit <obj> <keyword>": run on the game thread (BridgeTick). */
@@ -3417,7 +3432,7 @@ namespace sl {
                 bool kw = false;
                 for (const char* c = r.name; *c; c++) if ((u8)*c >= 0x80) kw = true;
                 if (!kw) continue;
-                DbgPrint("S ctx %lx %s", (unsigned long)r.ctx, r.name); shown++;
+                DbgPrint("S ctx %lx asset %lx %s", (unsigned long)r.ctx, (unsigned long)r.asset, r.name); shown++;
             }
             for (u32 k = (ne > 256 ? ne - 256 : 0); k < ne && shown < 240; k++, shown++)
                 DbgPrint("E obj %lx ctx %lx asset %lx", (unsigned long)s_XEmit[k & 255].obj, (unsigned long)s_XEmit[k & 255].ctx, (unsigned long)s_XEmit[k & 255].asset);
@@ -3568,7 +3583,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.66-fx2 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.66-fx3 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -3920,8 +3935,9 @@ HOOK_DEFINE_TRAMPOLINE(EditCursorCentre) {
    dbg "xrec" / "xlog". */
 HOOK_DEFINE_TRAMPOLINE(XLinkSearch) {
     static void* Callback(void* ctx, const char* name) {
-        sl::XRecSearch(ctx, name);
-        return Orig(ctx, name);
+        void* r = Orig(ctx, name);
+        sl::XRecSearch(ctx, name, r);
+        return r;
     }
 };
 HOOK_DEFINE_TRAMPOLINE(XLinkEmitHook) {
