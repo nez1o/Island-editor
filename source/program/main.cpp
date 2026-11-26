@@ -2519,9 +2519,11 @@ namespace sl {
         u32 i = *reinterpret_cast<u32*>(body + ActorRecordIndex);
         if (i >= 47) return 0;
         s16 t = *reinterpret_cast<s16*>(recs + i * 0x14);
-        bool listed = false;
-        for (s16 b : k_BuildingCells) if (b == t) listed = true;
-        if (!listed) return 0;
+        if (t <= 0 || t == BridgeBuildingType || t == InclineBuildingType) return 0;
+        /* sai: any building may go, except the ones holding story / save data: player houses (1-8),
+           Resident Services (20) and the Airport (22) - but a spawned copy of those may */
+        bool keep = (t >= 1 && t <= 8) || t == 20 || t == 22;
+        if (!keep) return t;
         for (u32 k = 0; k < i; k++) if (*reinterpret_cast<s16*>(recs + k * 0x14) == t) return t;
         return 0;
     }
@@ -4063,7 +4065,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn21 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn22 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
