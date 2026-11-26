@@ -254,13 +254,18 @@ Spawns bridges / inclines at the cursor from HHP's exterior menu, opened on a bo
   sparkles on removal, smooth turn/resize with fitting sounds.
 - `dbg.py find` over all memory takes ~5 min in Eden and blocks the watch thread (log, cmd.txt) meanwhile;
   dbg.py gives up after 30 s, so poll `dbg_out.txt` yourself.
-- **D-pad left icon (romfs, `tools/dpad_icon.py`)**: the editor's D-pad guide is in
-  `Layout/InteriorWherearenIslands` (N_TypeInside_05 on the main island). Animation `_KeyLeft` (step keys)
-  picks the left slot: frame 0 grey arrow (N_KeyLeftOff_00, what the island editor shows), frame 1 lit
-  arrow + icon (N_KeyLeft_00 / P_InteriorModePlus_00, HHP interiors), frame 2 N_KeyLeft_02 (seasons). The
-  tool shows N_KeyLeft_00 at frame 0 too and gives P_InteriorModePlus_00 a texture pattern (frame 0 = new
-  `IconSpawnDpad^s`, frame 1 = the game's `IconCatInteriorPlus^s`); also the layout defaults. Found live:
-  pane objects keep their name at +0xb0 (dbg `find` on "N_KeyLeft_00"), parent chain up to RootPane.
+- **D-pad left icon (romfs, `tools/dpad_icon.py`, works, checked on a Switch 2026-11-26)**: the editor's
+  D-pad guide is `Layout/InteriorWherearenIslands`, drawn twice; the copy on screen is N_InOutLeft_01 >
+  N_Type_02 (sun on top, faded left arrow P_JujiL_05). Animation `_KeyLeft` (step keys, applied when the
+  editor opens, not every frame) picks the left slot; frame 2 = seasons (N_KeyLeft_03 / _02 with
+  P_Season_01 / _00); the island editor runs at frame 0. The tool shows the season slot at frame 0 too and
+  gives its icons a texture pattern (frame 0 = new `IconSpawnDpad^s`, else the game's season icon).
+  Dead ends: N_TypeInside_05 / N_Type_06 (the other copy, drawn but not visible) and `Layout/LRoomGuide`.
+  Found by poking pane visible bits live (pane +0x58 bit 0; name at +0xb0, parent +0x18).
+- **Real Switch workflow**: FTP (sys-ftpd-light, port 5000) for files; `SWITCH_FTP=<ip>:5000 tools/dbg.py`
+  for live memory (a full `find` takes ~40 s on a Switch vs ~5 min in Eden). Keep the console's own
+  exefs/main.npdm (the exlaunch one lacks services the real game needs). Screenshots: /Nintendo/Album.
+  spawntest23: `find` re-checks each page before reading (a scan crashed the game when memory was freed).
 - Still to do: Buildings tab (empty houses, shops & services, decorations) with pixel-art icons
   (`tools/bridges_tab.py` / `bridge_icons.py` show how tabs and icons are added), the D-pad left icon in the
   editor's D-pad guide (empty left slot), remove the test logging (camera snapshot/diff, zoom logs) before a release.
