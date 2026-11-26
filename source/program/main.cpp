@@ -1372,7 +1372,7 @@ namespace sl {
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
     FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, -2, 0, -10 } };   /* not static: dbg finds it by symbol */
     struct DimTune { float hx, hz, ox, oz, perTile; };
-    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 10, 12, 0, 0, 5 }, { 24, 9, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 24, 9, 0, 0, 0 }, { 10, 10, 0, 0, 5 } };
     /* Houses / shops: one size per record type (sai's player house and a villager house differ):
        half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
        index = record type, 4 floats each). 0 = use s_Dim[0]. */
@@ -1393,7 +1393,7 @@ namespace sl {
         return recs && i < 47 ? reinterpret_cast<s16*>(recs + i * 0x14) : nullptr;
     }
     static bool BridgeLook(u16 id, int* mat, int* shape);
-    static void FitRect(u8* body, int fk, u8* out, u8* minOut) {
+    static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
         const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
         int rot = 0, shape = 0;
         {   /* which body / record the square is for, once per change (inclines didn't take their size) */
@@ -1424,13 +1424,13 @@ namespace sl {
         /* plus a world offset (not turned): every square sat about half a cell toward +x / +z,
            whichever way the structure faced (Switch screenshots) */
         float cx = p->x + ox + s_Foot[fk].dx, cz = p->z + oz + s_Foot[fk].dz;
-        auto cell = [](float v) { return (s32)__builtin_floorf(v / 5.0f); };
-        s32 x0 = cell(cx - hx), z0 = cell(cz - hz), x1 = cell(cx + hx - 0.01f), z1 = cell(cz + hz - 0.01f);
-        if (out) {
-            *reinterpret_cast<s32*>(out + 0x10) = x0; *reinterpret_cast<s32*>(out + 0x14) = z0;
-            *reinterpret_cast<s32*>(out + 0x20) = x1; *reinterpret_cast<s32*>(out + 0x24) = z1;
-        }
-        (void)minOut;   /* (left as the game made it: its layout isn't known) */
+        /* footprint in whole tiles (unturned sizes: the game turns it), placed at the middle */
+        float ux = d.hx + (fk == 1 ? d.perTile * len : 0.0f), uz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
+        s32 tx = (s32)(2.0f * ux / 10.0f + 0.5f) - 1, tz = (s32)(2.0f * uz / 10.0f + 0.5f) - 1;
+        *txOut = tx < 0 ? 0 : tx;
+        *tzOut = tz < 0 ? 0 : tz;
+        pos->x = cx; pos->z = cz; pos->y += s_Foot[fk].dy;
+        (void)hx; (void)hz;
     }
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         s_CursorQueryTick = NowTick();
@@ -1470,17 +1470,26 @@ namespace sl {
            poke (sl::s_Foot): [0] houses / shops, [1] bridges, [2] inclines. */
         int fk = StructureOfBody(body) == 26 ? 1 : StructureOfBody(body) == 27 ? 2 : 0;   /* 26 bridge, 27 incline */
         bool borrowed = body == s_SpawnBody && (s_SpawnArmed || s_SpawnMode);
-        *reinterpret_cast<s32*>(c->owner + 0x5b8) = borrowed ? 0 : s_Foot[fk].tx;
-        *reinterpret_cast<s32*>(c->owner + 0x5bc) = borrowed ? 0 : s_Foot[fk].tz;
+        /* The square the editor draws is the footprint (owner +0x5b8 / +0x5bc: last TILE index, 10
+           units each, before turning) placed at the position given below, turned by the transform's
+           rotation. (Writing the cell rect afterwards changed nothing on screen.) Size and middle come
+           from FootOf (per kind / record type, measured from screenshots). */
         Vec3f fp = *BldPos(c);
-        if (!borrowed) fp.y += s_Foot[fk].dy;
+        if (borrowed) {
+            *reinterpret_cast<s32*>(c->owner + 0x5b8) = 0;
+            *reinterpret_cast<s32*>(c->owner + 0x5bc) = 0;
+        } else {
+            s32 tx, tz;
+            FootOf(body, fk, &tx, &tz, &fp);
+            *reinterpret_cast<s32*>(c->owner + 0x5b8) = tx;
+            *reinterpret_cast<s32*>(c->owner + 0x5bc) = tz;
+        }
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
             *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
         using RectFn = void (*)(BldComp*, u8*, void*);
         if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
         if (minOut) reinterpret_cast<RectFn>(Main(BldRectMin))(c, minOut, &at);
-        if (!borrowed) FitRect(body, fk, out, minOut);
         return *reinterpret_cast<u32*>(body + 0x230);
     }
 
@@ -3846,7 +3855,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn7 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn8 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
