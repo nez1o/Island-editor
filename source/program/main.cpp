@@ -971,8 +971,31 @@ namespace sl {
         c->dx = tx; c->dz = tz;
     }
 
-    /* 0x70: placement check - anywhere goes on the main island (bridges may stack too). */
-    static u32 BldValid(BldComp* c, u64, const u8*) { return c->grabbed ? 1 : 0; }
+    /* Buildings are rebuilt at grass level wherever they go (seen on a Switch: a shop dragged onto
+       the beach hung in the air). Flat ground at 0 or above around (x, z): the middle and 4 points
+       <r> away. */
+    static bool FlatGroundAt(float x, float z, float r, float* loOut = nullptr, float* hiOut = nullptr) {
+        using HeightFn = float (*)(float, float*, u32*, u64);
+        float lo = 1e9f, hi = -1e9f;
+        for (int k = 0; k < 5; k++) {
+            float pt[3] = { x + (k == 1 ? -r : k == 2 ? r : 0.0f), 0.0f, z + (k == 3 ? -r : k == 4 ? r : 0.0f) };
+            float h = reinterpret_cast<HeightFn>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, pt, nullptr, 0);
+            if (h < lo) lo = h;
+            if (h > hi) hi = h;
+        }
+        if (loOut) *loOut = lo;
+        if (hiOut) *hiOut = hi;
+        return lo >= -0.5f && hi - lo <= 1.0f;
+    }
+
+    /* 0x70: placement check - bridges / inclines anywhere (they may stack); houses and shops only on
+       flat ground (the editor then refuses the drop and puts the building back). */
+    static int StructureOfBody(u8* body);
+    static u32 BldValid(BldComp* c, u64, const u8*) {
+        if (!c->grabbed) return 0;
+        if (StructureOfBody(c->body)) return 1;
+        return FlatGroundAt(c->startX + c->dx, c->startZ + c->dz, 20.0f) ? 1 : 0;
+    }
 
     /* 0x78: drop at pos and keep it. */
     static void BldDrop(BldComp* c, const u8* pos) {
@@ -2611,15 +2634,8 @@ namespace sl {
             type = k_BuildingCells[cell]; id = 0;
             /* Buildings are built at grass level: only on flat ground at 0 or above (not the beach) */
             const Vec3f* cc = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
-            using HeightFn = float (*)(float, float*, u32*, u64);
-            float lo = 1e9f, hi = -1e9f;
-            for (int k = 0; k < 5; k++) {
-                float pt[3] = { cc->x + (k == 1 ? -20.0f : k == 2 ? 20.0f : 0.0f), 0.0f, cc->z + (k == 3 ? -20.0f : k == 4 ? 20.0f : 0.0f) };
-                float hgt = reinterpret_cast<HeightFn>(Main(GroundHeight))(0.0f, pt, nullptr, 0);
-                if (hgt < lo) lo = hgt;
-                if (hgt > hi) hi = hgt;
-            }
-            if (lo < -0.5f || hi - lo > 1.0f) {
+            float lo, hi;
+            if (!FlatGroundAt(cc->x, cc->z, 20.0f, &lo, &hi)) {
                 Log("buildings: not placed - the ground isn't flat grass here (height %d..%d)", (int)lo, (int)hi);
                 return false;
             }
@@ -3426,7 +3442,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.65-buildings2 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.65-buildings3 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
