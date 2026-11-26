@@ -1407,7 +1407,7 @@ namespace sl {
     struct FootTune { s32 tx, tz; float dx, dy, dz; };
     FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
     struct DimTune { float hx, hz, ox, oz, perTile; };
-    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 20, 20, 0, -5, 0 }, { 10, 10, 0, 0, 5 } };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 20, 17.5f, 0, -5, 0 }, { 10, 10, 0, 0, 5 } };
     /* Houses / shops: one size per record type (sai's player house and a villager house differ):
        half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
        index = record type, 4 floats each). 0 = use s_Dim[0]. */
@@ -1456,16 +1456,28 @@ namespace sl {
         float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
         float ox = d.ox, oz = d.oz;
         for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
-        /* plus a world offset (not turned): every square sat about half a cell toward +x / +z,
-           whichever way the structure faced (Switch screenshots) */
-        float cx = p->x + ox + s_Foot[fk].dx, cz = p->z + oz + s_Foot[fk].dz;
-        /* footprint in whole tiles (unturned sizes: the game turns it), placed at the middle */
-        float ux = d.hx + (fk == 1 ? d.perTile * len : 0.0f), uz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
-        s32 tx = (s32)(2.0f * ux / 10.0f + 0.5f) - 1, tz = (s32)(2.0f * uz / 10.0f + 0.5f) - 1;
-        *txOut = tx < 0 ? 0 : tx;
-        *tzOut = tz < 0 ? 0 : tz;
+        /* The game's rect (0x2a85468): W = +0x5b8 + 1 tiles (with +0x5a8 = 0), D = +0x5bc + 1 tiles
+           (with +0x5ac = 1), first tile = floor((pos - 5*W + 5) / 10), so its middle is a tile middle
+           for odd sizes and a tile line for even ones: no offset can move it less than a tile. So the
+           middle wanted is rounded to 5 units and the size whose parity puts the square's middle there
+           exactly is used (the nearer of the two, the bigger on a tie). Sizes are not turned by the
+           game: hx / hz are already turned above. */
+        float cx = p->x + ox, cz = p->z + oz;
+        auto pick = [](float half, float& c) -> s32 {
+            float raw = half / 5.0f;                       /* tiles */
+            s32 c5 = (s32)(c / 5.0f + (c >= 0 ? 0.5f : -0.5f));
+            c = c5 * 5.0f;
+            bool odd = (c5 & 1) != 0;                      /* middle of a tile -> odd width */
+            s32 lo = (s32)raw, hi = lo + 1;
+            if (((lo & 1) != 0) != odd) lo--;
+            if (((hi & 1) != 0) != odd) hi++;
+            if (lo < 1) return hi;
+            return raw - lo < hi - raw ? lo : hi;
+        };
+        s32 w = pick(hx, cx), dz = pick(hz, cz);
+        *txOut = w - 1;
+        *tzOut = dz - 1;
         pos->x = cx; pos->z = cz; pos->y += s_Foot[fk].dy;
-        (void)hx; (void)hz;
     }
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
         s_CursorQueryTick = NowTick();
@@ -1516,6 +1528,8 @@ namespace sl {
         } else {
             s32 tx, tz;
             FootOf(body, fk, &tx, &tz, &fp);
+            *reinterpret_cast<s32*>(c->owner + 0x5a8) = 0;   /* see FootOf: W = tx + 1, D = tz + 1 */
+            *reinterpret_cast<s32*>(c->owner + 0x5ac) = 1;
             *reinterpret_cast<s32*>(c->owner + 0x5b8) = tx;
             *reinterpret_cast<s32*>(c->owner + 0x5bc) = tz;
         }
@@ -2027,8 +2041,10 @@ namespace sl {
         if (++s_BounceF >= (int)(sizeof(k_Bounce) / sizeof(k_Bounce[0]))) s_BounceF = -1;
     }
 
+    void ShrinkTick();
     void BuildingTick() {
         HeldTick();
+        ShrinkTick();
         BounceTick();
         CliffStackTick();
         UnlockTick();
@@ -2968,6 +2984,41 @@ namespace sl {
         });
     }
 
+    /* Removal like furniture being put away: the actors shrink (scale at body +0x818, and sink a
+       little in case the scale is only read when built) for a few frames, then are deleted. */
+    struct Shrinking { u32 h; int f; float y; };
+    static Shrinking s_Shrink[8];
+    static int s_ShrinkCount = 0;
+    constexpr int ShrinkFrames = 12;
+    static void ShrinkActorsOfRecord(int idx) {
+        using DelFn = void (*)(u8*);
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)idx) return;
+            if (s_ShrinkCount >= 8) { reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a); return; }
+            s_Shrink[s_ShrinkCount++] = { *reinterpret_cast<u32*>(a + 0x230), 0, reinterpret_cast<Vec3f*>(a + 0x7f0)->y };
+        });
+    }
+    void ShrinkTick() {
+        using DelFn = void (*)(u8*);
+        for (int i = 0; i < s_ShrinkCount; i++) {
+            Shrinking& k = s_Shrink[i];
+            u8* a = ActorOfHandle(k.h);
+            if (a && ++k.f < ShrinkFrames) {
+                float t = (float)k.f / ShrinkFrames;
+                float sc = 1.0f - t * t;             /* eases in, like the game's put-away */
+                if (sc < 0.02f) sc = 0.02f;
+                Vec3f* s3 = reinterpret_cast<Vec3f*>(a + 0x818);
+                *s3 = { sc, sc, sc };
+                float y = k.y - 4.0f * t * t;
+                reinterpret_cast<Vec3f*>(a + 0x7f0)->y = y;
+                reinterpret_cast<Vec3f*>(a + 0x7fc)->y = y;
+                continue;
+            }
+            if (a) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+            s_Shrink[i--] = s_Shrink[--s_ShrinkCount];
+        }
+    }
+
     bool RemoveStructure(u8* body) {
         u8* recs = BuildingRecords();
         int type = StructureOfBody(body);
@@ -2983,7 +3034,7 @@ namespace sl {
            moved still has its old actor for a moment, which stayed visible and needed more presses */
         Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
         PlayEditFx("道造成消失煙", "道造成消失煙", at);   /* the path tool's vanishing smoke + its sound ("put away" was a faint click) */
-        DeleteActorsOfRecord((int)idx);   /* (includes <body>; deleting one twice isn't safe) */
+        ShrinkActorsOfRecord((int)idx);   /* (includes <body>; deleted once shrunk - deleting one twice isn't safe) */
         u8 zero[0x14] = {};
         WriteRecord((int)idx, zero);
         s_ShapePending |= 1ull << idx;
@@ -3891,7 +3942,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn9 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn10 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
