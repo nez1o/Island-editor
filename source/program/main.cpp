@@ -48,20 +48,6 @@ namespace sl {
     constexpr const char* TogglesPath = "slsd:/slumbertoggle/toggles.txt";
 
     static bool s_SdReady = false;
-    static u8* SaveImage();
-    static u8 s_VvsBuf[0x9b0e90];          /* copy of the save image, written to the SD card by the watch thread */
-    static std::atomic<bool> s_VvsWrite{false};
-    /* Debug: write a block of memory to the SD card (ValidateVillageSave investigation). */
-    static void DumpToSd(const char* path, const void* p, long len) {
-        if (!s_SdReady || !p || len <= 0) return;
-        nn::fs::DeleteFile(path);
-        if (R_FAILED(nn::fs::CreateFile(path, len))) return;
-        nn::fs::FileHandle h;
-        if (R_SUCCEEDED(nn::fs::OpenFile(&h, path, nn::fs::OpenMode_Write))) {
-            nn::fs::WriteFile(h, 0, p, len, nn::fs::WriteOption::CreateOption(nn::fs::WriteOptionFlag_Flush));
-            nn::fs::CloseFile(h);
-        }
-    }
     static s64  s_LogPos  = 0;
 
     /* Once the watch thread runs, log lines are queued and written from there: an SD
@@ -194,6 +180,8 @@ namespace sl {
     constexpr u32 KeepWeather    = 0x987e14;   /* map load: "tbz w8, #0" skips the Slumber weather copy */
     constexpr u32 KeepWeatherOrig = 0x360002e8;
     constexpr u32 Nop            = 0xd503201f;
+    constexpr u32 KeepItemsCall  = 0x1288bf4;  /* load-time field item check: "bl 0x11e5af4" removes a misplaced item */
+    constexpr u32 KeepItemsOrig  = 0x97fd73c0;
 
     static bool s_WeatherPicked = false;
 
@@ -1339,7 +1327,6 @@ namespace sl {
     /* Quick start (sai: "skip the game opening"): from boot until the player is first on the island,
        A is pressed for you (100 ms every 600 ms, from 3 s after boot, at most 3 minutes): the title
        screen and the notices after it go by without waiting. Off with quick_start=0. */
-    int s_VvsForce = -1;   /* toggles.txt "vvs_force": -1 = game's value, 0 / 1 = ValidateVillageSave forced */
     static bool s_QuickStart = false;   /* toggles.txt "quick_start" (off: it kept pressing A in Eden) */
     void QuickStartPad(void* states, int count) {
         static s64 s_Boot = 0;
@@ -3650,10 +3637,6 @@ namespace sl {
                         Log("app_flip_y = %d", flip);
                     }
                 }
-                if (strcmp(line, "vvs_force") == 0) {
-                    int v = eq[1] == '-' ? -1 : eq[1] - '0';
-                    if (v != s_VvsForce) { s_VvsForce = v; Log("vvs_force = %d", v); }
-                }
                 if (strcmp(line, "quick_start") == 0) {
                     bool on = eq[1] != '0';
                     if (on != s_QuickStart) { s_QuickStart = on; Log("quick_start = %d", on ? 1 : 0); }
@@ -4013,13 +3996,6 @@ namespace sl {
             }
             return;
         }
-        if (strcmp(cmd, "dumpimg") == 0) {   /* dumpimg: the live main.dat image -> vvs_post.bin */
-            u8* img = SaveImage();
-            if (!img) { DbgPrint("! no image"); return; }
-            DumpToSd("slsd:/slumbertoggle/vvs_post.bin", img, 0x9b0e90);
-            DbgPrint("image %p written to vvs_post.bin", img);
-            return;
-        }
         if (strcmp(cmd, "snap") == 0) {
             long len = strtol(SkipWs(p), nullptr, 0);
             if (len <= 0 || len > (long)sizeof(s_DbgSnap)) len = sizeof(s_DbgSnap);
@@ -4100,7 +4076,6 @@ namespace sl {
                 DbgPoll();
             }
             FlushLog();
-            if (s_VvsWrite.exchange(false)) { DumpToSd("slsd:/slumbertoggle/vvs_pre.bin", s_VvsBuf, sizeof(s_VvsBuf)); Log("vvs: vvs_pre.bin written"); }
             if (s_AppSave.exchange(false)) WriteDefaultToggles();   /* changes made in the Slumber app */
             if (ReadToggles()) ApplyAll();
             /* The real table is filled during boot; keep the terraforming copy in sync. */
@@ -4122,7 +4097,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-vvs3 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.68-keep1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -4131,6 +4106,12 @@ namespace sl {
 
         /* Current state in memory (an IPS version of a patch may already be applied). */
         Mem m;
+        /* Keep creative placements: since 3.0 the save processing at load (SaveProc thread) clears
+           field items it considers misplaced, e.g. furniture standing in water (found in Eden with a
+           write watchpoint on a moon's tile: 0x1288bf4 calls the remover 0x11e5af4). The call is
+           skipped, so items placed with NHSE / the island editor stay where they are. */
+        if (*m.Ro(KeepItemsCall) == KeepItemsOrig) { WriteWord(m, KeepItemsCall, Nop); Log("keep_items: load-time item removal skipped"); }
+        else Log("keep_items: unexpected code at %x (%08x) - left alone", KeepItemsCall, *m.Ro(KeepItemsCall));
         for (size_t i = 0; i < FeatureCount; i++) {
             int st = ReadState(m, g_Features[i]);
             g_Features[i].applied = st == 1;
@@ -4173,48 +4154,12 @@ static void Trace(const char* what, long* ref, u32 value) {
     if (name && strncmp(name, "SLT_", 4) == 0) sl::Log("menu flag %s %s value=%u", what, name, value);
 }
 
-namespace sl {
-    /* ValidateVillageSave investigation (3.0 removes items in water / stacked at load): log each query
-       of that land flag with its caller, and write the live main.dat image to the SD card the first
-       time it is asked with the save loaded. */
-    static u8* SaveImage() {
-        uintptr_t d = *reinterpret_cast<uintptr_t*>(Main(SaveRootGlobal));
-        if (!d || !MemOk(d + 0x10, 8, false)) return nullptr;
-        uintptr_t p3 = *reinterpret_cast<uintptr_t*>(d + 0x10);
-        if (!p3 || !MemOk(p3, 8, false)) return nullptr;
-        uintptr_t x = *reinterpret_cast<uintptr_t*>(p3);
-        if (!x || !MemOk(x + 0x10, 0x9b0e90, false)) return nullptr;
-        return reinterpret_cast<u8*>(x + 0x10);
-    }
-    static bool IsVvs(long* ref) {
-        const char* n = ref ? reinterpret_cast<const char*>(ref[1]) : nullptr;
-        return n && strcmp(n, "ValidateVillageSave") == 0;
-    }
-    static void VvsQuery(const char* how, long* ref, u32 val, uintptr_t lr) {
-        const char* n = ref ? reinterpret_cast<const char*>(ref[1]) : nullptr;
-        if (!n || strcmp(n, "ValidateVillageSave") != 0) return;
-        static int s_Logs = 0;
-        static bool s_Dumped = false;
-        if (s_Logs < 60) { s_Logs++; Log("vvs: %s = %u from main+%lx", how, val, (unsigned long)(lr - exl::util::modules::GetTargetStart())); }
-        u8* img = SaveImage();
-        if (!s_Dumped && img && *reinterpret_cast<u64*>(img + 0x32f700)) {
-            s_Dumped = true;
-            memcpy(s_VvsBuf, img, sizeof(s_VvsBuf));   /* written by the watch thread: writing here froze the game */
-            s_VvsWrite = true;
-            Log("vvs: image %p copied (vvs_pre.bin follows)", img);
-        }
-    }
-}
-
 /* u16 get - used by EventFlowQueryEventFlagSystemBool/Int for cLand. */
 HOOK_DEFINE_TRAMPOLINE(LandFlagGet) {
     static u16 Callback(long* ref) {
         Trace("get", ref, 0);
         if (sl::Feature* f = sl::FindSlt(FlagName(ref))) return f->applied ? 1 : 0;
-        u16 v = Orig(ref);
-        sl::VvsQuery("get", ref, v, (uintptr_t)__builtin_return_address(0));
-        if (sl::s_VvsForce >= 0 && sl::IsVvs(ref)) v = (u16)sl::s_VvsForce;
-        return v;
+        return Orig(ref);
     }
 };
 
@@ -4223,10 +4168,7 @@ HOOK_DEFINE_TRAMPOLINE(LandFlagGetBool) {
     static bool Callback(long* ref) {
         Trace("getbool", ref, 0);
         if (sl::Feature* f = sl::FindSlt(FlagName(ref))) return f->applied;
-        bool v = Orig(ref);
-        sl::VvsQuery("getbool", ref, v, (uintptr_t)__builtin_return_address(0));
-        if (sl::s_VvsForce >= 0 && sl::IsVvs(ref)) v = sl::s_VvsForce != 0;
-        return v;
+        return Orig(ref);
     }
 };
 
