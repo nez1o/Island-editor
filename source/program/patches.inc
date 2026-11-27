@@ -183,6 +183,29 @@ static const PatchWord k_fences_anywhere[] = {
     {0x13c76f8, 0x12000109, 0x52800009},   /* editor cursor "blocked" flag => 0: the fence cursor stays blue */
 };
 
+/* Terraform anywhere (hand-added): every terraforming check in the field checker (0x11f2e18..) is
+   skipped and each checker's failure tail reports success. Found on a Switch with the GDB stub. */
+static const PatchWord k_terraform_anywhere[] = {
+    {0x11f39b0, 0x370009e0, 0xd503201f},   /* tree test */
+    {0x11f4678, 0x37000480, 0xd503201f},   /* river near tree */
+    {0x11f57ac, 0x3707e740, 0xd503201f},   /* error 2 */
+    {0x11f58a8, 0x37000120, 0xd503201f},   /* cliff create near tree */
+    {0x11f6318, 0x37003f60, 0xd503201f},   /* break: check 0x11f8fd0 */
+    {0x11f6330, 0x37003e80, 0xd503201f},   /* break: check 0x11f91c0 */
+    {0x11f73f8, 0x37000140, 0xd503201f},   /* cliff break tree on top */
+    {0x11f55ac, 0x36000080, 0x14000004},   /* create: check 0x878710 */
+    {0x11f5d38, 0x360000c0, 0x14000006},   /* check 0x878710 */
+    {0x11f62cc, 0x360000c0, 0x14000006},   /* break: check 0x11f8da0 */
+    {0x11f62f8, 0x360000a0, 0x14000005},   /* break: check 0x11f8da0 (error 4) */
+    {0x11f554c, 0x37201088, 0xd503201f},   /* cliff create: building ground marker (error 2) */
+    {0x11f5a34, 0x37080188, 0xd503201f},   /* cliff create: waterfall in front (error 10) */
+    {0x11f4104, 0x37103e48, 0xd503201f},   /* river: building ground marker (error 11) */
+    {0x11f5700, 0x34000148, 0x1400000a},   /* cliff create: any failure -> success */
+    {0x11f3c04, 0x34000148, 0x1400000a},   /* river make: any failure -> success */
+    {0x11f6e08, 0x3400014a, 0x1400000a},   /* cliff/river break: any failure -> success */
+    {0x11f3414, 0x34000148, 0x1400000a},   /* water remove: any failure -> success */
+};
+
 static Feature g_Features[] = {
     {"slumber_dpad", "Slumber catalog + time (D-pad)", k_slumber_dpad, sizeof(k_slumber_dpad) / sizeof(PatchWord), true, false},
     {"instant_bridges", "Instant bridges/inclines", k_instant_bridges, sizeof(k_instant_bridges) / sizeof(PatchWord), true, false},
@@ -200,4 +223,5 @@ static Feature g_Features[] = {
     {"unlock_all", "Unlock all phone apps, construction permits and HHP tools", nullptr, 0, true, false},
     {"cliff_stack", "Cliff tool stacks a cliff on a flush edge (instant, like a save editor)", nullptr, 0, true, false},
     {"fences_anywhere", "Fences anywhere", k_fences_anywhere, sizeof(k_fences_anywhere) / sizeof(PatchWord), true, false},
+    {"terraform_anywhere", "Terraform anywhere", k_terraform_anywhere, sizeof(k_terraform_anywhere) / sizeof(PatchWord), true, false},
 };

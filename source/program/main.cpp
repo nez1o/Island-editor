@@ -3697,6 +3697,7 @@ namespace sl {
         { "island_editor", "Island editor app", "Happy Home Paradise's outdoor editor on your island: place items anywhere, move houses (needs HHP)." },
         { "unlock_all", "Unlock everything", "All phone apps, construction permits and HHP unlocks." },
         { "cliff_stack", "Stacked cliffs", "The cliff tool stacks a cliff on a flush edge, instantly, with solid walls." },
+        { "terraform_anywhere", "Terraform anywhere", "Cliffs and water anywhere: every terraforming rule and error skipped. Back up your save." },
         { "fences_anywhere", "Fences anywhere", "Place fences anywhere, also with the island editor (not on top of other items)." },
     };
     static const int k_SpeedSteps[] = { 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 60 };
@@ -4108,7 +4109,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.69-fence4 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.70-terra1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
