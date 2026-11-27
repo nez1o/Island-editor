@@ -337,3 +337,9 @@ Trampolines on the cliff/river tool state exec/exit handlers (`0x229dcd8`, `0x22
   write watchpoint on the item layer tile (save image + 0x25fe88 for the test moon, item 0x1AAD): writer
   main+0x11e59bc, called via 0x11e5af4 from 0x1288bf4 (condition at 0x1288bd8: not placeable per 0x87bf30,
   or w24). Init NOPs the `bl 0x11e5af4` at 0x1288bf4. The land flag ValidateVillageSave (=1) is not it.
+- **Fences anywhere (v0.69)**: normal fence placing: fence maker state 0xa7 = cFenceMakerActionNG; its checks in
+  0x238b100.. are skipped (0x238b1f8 / 0x238b3c8 / 0x238b408). Island editor fence tool (found live on a Switch
+  with Atmosphere's GDB stub, port 22225, enable_standalone_gdbstub; branch coverage at a refused vs an allowed
+  spot): spot check 0x21beacc -> 1, put step 0x13e0a20 -> always put, fence rect check 0x10f3270 keeps only the
+  "tile already has an item" test, cursor blocked flag 0x13c76f8 -> 0 (stays blue). dbg `patch <addr> <word>`
+  writes code live. Items placed at half-tile spots by the editor can block a fence's tile.
