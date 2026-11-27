@@ -332,3 +332,8 @@ Trampolines on the cliff/river tool state exec/exit handlers (`0x229dcd8`, `0x22
 - quick_start (toggles.txt): A pressed from boot until the player is on the island.
 - HHP facilities (school, cafe...) are baked into FldOutCenterIsland01..07, not separate buildings.
 - SysDVR (Wi-Fi, RTSP :6666) on the Switch: ffmpeg -rtsp_transport tcp -i rtsp://<ip>:6666/ -frames:v 1 x.jpg
+- **Keep creative item placements (v0.68)**: since 3.0 the load-time save processing (SaveProc thread) clears
+  field items it considers misplaced (furniture in water: all its tiles become 0xFFFE). Found in Eden with a
+  write watchpoint on the item layer tile (save image + 0x25fe88 for the test moon, item 0x1AAD): writer
+  main+0x11e59bc, called via 0x11e5af4 from 0x1288bf4 (condition at 0x1288bd8: not placeable per 0x87bf30,
+  or w24). Init NOPs the `bl 0x11e5af4` at 0x1288bf4. The land flag ValidateVillageSave (=1) is not it.

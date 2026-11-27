@@ -180,6 +180,8 @@ namespace sl {
     constexpr u32 KeepWeather    = 0x987e14;   /* map load: "tbz w8, #0" skips the Slumber weather copy */
     constexpr u32 KeepWeatherOrig = 0x360002e8;
     constexpr u32 Nop            = 0xd503201f;
+    constexpr u32 KeepItemsCall  = 0x1288bf4;  /* load-time field item check: "bl 0x11e5af4" removes a misplaced item */
+    constexpr u32 KeepItemsOrig  = 0x97fd73c0;
 
     static bool s_WeatherPicked = false;
 
@@ -1325,7 +1327,7 @@ namespace sl {
     /* Quick start (sai: "skip the game opening"): from boot until the player is first on the island,
        A is pressed for you (100 ms every 600 ms, from 3 s after boot, at most 3 minutes): the title
        screen and the notices after it go by without waiting. Off with quick_start=0. */
-    static bool s_QuickStart = true;   /* toggles.txt "quick_start" */
+    static bool s_QuickStart = false;   /* toggles.txt "quick_start" (off: it kept pressing A in Eden) */
     void QuickStartPad(void* states, int count) {
         static s64 s_Boot = 0;
         static bool s_Done = false;
@@ -4095,7 +4097,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-furn29 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.68-keep1 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -4104,6 +4106,12 @@ namespace sl {
 
         /* Current state in memory (an IPS version of a patch may already be applied). */
         Mem m;
+        /* Keep creative placements: since 3.0 the save processing at load (SaveProc thread) clears
+           field items it considers misplaced, e.g. furniture standing in water (found in Eden with a
+           write watchpoint on a moon's tile: 0x1288bf4 calls the remover 0x11e5af4). The call is
+           skipped, so items placed with NHSE / the island editor stay where they are. */
+        if (*m.Ro(KeepItemsCall) == KeepItemsOrig) { WriteWord(m, KeepItemsCall, Nop); Log("keep_items: load-time item removal skipped"); }
+        else Log("keep_items: unexpected code at %x (%08x) - left alone", KeepItemsCall, *m.Ro(KeepItemsCall));
         for (size_t i = 0; i < FeatureCount; i++) {
             int st = ReadState(m, g_Features[i]);
             g_Features[i].applied = st == 1;
