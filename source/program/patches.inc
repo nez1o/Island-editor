@@ -172,6 +172,14 @@ static const PatchWord k_fences_anywhere[] = {
     {0x238b1f8, 0x36000140, 0x1400004b},   /* tbz w0 -> NG  =>  b 0x238b324 (past the first checks) */
     {0x238b3c8, 0x37000220, 0xd503201f},   /* tbnz w0 -> NG =>  nop */
     {0x238b408, 0x34000820, 0x14000041},   /* cbz w0 -> ok  =>  b 0x238b50c */
+    /* Island editor fence tool (found on a Switch with the Atmosphere GDB stub, comparing branch
+       coverage at a refused and an allowed spot): */
+    {0x21beacc, 0xd10243ff, 0x52800020},   /* editor fence spot check (3 callers, all editor fence code) => return 1 */
+    {0x21bead0, 0xa9057bfd, 0xd65f03c0},
+    {0x13e0a20, 0x370004e8, 0x14000027},   /* put step: tile-attribute refusal => always go on to the put (0x13e0abc) */
+    {0x10f329c, 0x360006c0, 0xd503201f},   /* fence rect check 0x10f3270 (fence code only): area / ground / per-tile */
+    {0x10f32a8, 0x36000660, 0xd503201f},   /*   validity skipped; the "tile already has an item" check stays, so a */
+    {0x10f3300, 0x360003a0, 0xd503201f},   /*   fence never replaces another item */
 };
 
 static Feature g_Features[] = {
