@@ -316,3 +316,19 @@ Trampolines on the cliff/river tool state exec/exit handlers (`0x229dcd8`, `0x22
   no single gate found yet. Planned: differential function scan on an emulator (still vs walking into a wall).
 - Trees/bushes from the Slumber catalog on the main island once froze the game when entering a building:
   don't place plants from the Slumber catalog until investigated.
+
+#### 2026-11-26 (furn9-furn29, Switch)
+- Squares: drawn at the comp's BldPos (slot 0x20) result; size = fake owner footprint (+0x5b8/+0x5bc, W = v+1
+  with +0x5a8 = 0, D = v+1 with +0x5ac = 1), snapped to whole tiles by 0x2a85468 (odd sizes centre on a tile
+  middle, even on a tile line) -> FootOf picks the size parity; max 5 tiles per axis (6 draws nothing). The
+  highlight is an overlay: its height (BldPos y, hover query +0x2c) changes nothing.
+- Held structures bob / glide; drop bounce; turn = old actor dips, new one pops (scale body +0x818 and y are
+  live; the turn itself is baked at spawn). Removal shrinks (6 frames).
+- Y removes any building except player houses (1-8), Resident Services (20), Airport (22) (copies of those may go).
+- Buildings tab: 10 cells (19 21 20 24 25 28 23 29 42 9); 42 = StrcHotelA00 (Paradise Planning office).
+  Building types 30 and 31 spawn nothing (record left with no actor: clear it). Names show "(N left)":
+  STR_HouseRoofName 61000/62000/63000 + cell*50 + n (bridges_tab.py), n = SpawnSpacesLeft().
+- Walls for tab-placed buildings: RebuildShapes runs the house builder (0x2a3a450) for them.
+- quick_start (toggles.txt): A pressed from boot until the player is on the island.
+- HHP facilities (school, cafe...) are baked into FldOutCenterIsland01..07, not separate buildings.
+- SysDVR (Wi-Fi, RTSP :6666) on the Switch: ffmpeg -rtsp_transport tcp -i rtsp://<ip>:6666/ -frames:v 1 x.jpg
