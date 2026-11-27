@@ -1339,6 +1339,7 @@ namespace sl {
     /* Quick start (sai: "skip the game opening"): from boot until the player is first on the island,
        A is pressed for you (100 ms every 600 ms, from 3 s after boot, at most 3 minutes): the title
        screen and the notices after it go by without waiting. Off with quick_start=0. */
+    int s_VvsForce = -1;   /* toggles.txt "vvs_force": -1 = game's value, 0 / 1 = ValidateVillageSave forced */
     static bool s_QuickStart = false;   /* toggles.txt "quick_start" (off: it kept pressing A in Eden) */
     void QuickStartPad(void* states, int count) {
         static s64 s_Boot = 0;
@@ -3649,6 +3650,10 @@ namespace sl {
                         Log("app_flip_y = %d", flip);
                     }
                 }
+                if (strcmp(line, "vvs_force") == 0) {
+                    int v = eq[1] == '-' ? -1 : eq[1] - '0';
+                    if (v != s_VvsForce) { s_VvsForce = v; Log("vvs_force = %d", v); }
+                }
                 if (strcmp(line, "quick_start") == 0) {
                     bool on = eq[1] != '0';
                     if (on != s_QuickStart) { s_QuickStart = on; Log("quick_start = %d", on ? 1 : 0); }
@@ -4117,7 +4122,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.67-vvs2 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-vvs3 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -4181,6 +4186,10 @@ namespace sl {
         if (!x || !MemOk(x + 0x10, 0x9b0e90, false)) return nullptr;
         return reinterpret_cast<u8*>(x + 0x10);
     }
+    static bool IsVvs(long* ref) {
+        const char* n = ref ? reinterpret_cast<const char*>(ref[1]) : nullptr;
+        return n && strcmp(n, "ValidateVillageSave") == 0;
+    }
     static void VvsQuery(const char* how, long* ref, u32 val, uintptr_t lr) {
         const char* n = ref ? reinterpret_cast<const char*>(ref[1]) : nullptr;
         if (!n || strcmp(n, "ValidateVillageSave") != 0) return;
@@ -4204,6 +4213,7 @@ HOOK_DEFINE_TRAMPOLINE(LandFlagGet) {
         if (sl::Feature* f = sl::FindSlt(FlagName(ref))) return f->applied ? 1 : 0;
         u16 v = Orig(ref);
         sl::VvsQuery("get", ref, v, (uintptr_t)__builtin_return_address(0));
+        if (sl::s_VvsForce >= 0 && sl::IsVvs(ref)) v = (u16)sl::s_VvsForce;
         return v;
     }
 };
@@ -4215,6 +4225,7 @@ HOOK_DEFINE_TRAMPOLINE(LandFlagGetBool) {
         if (sl::Feature* f = sl::FindSlt(FlagName(ref))) return f->applied;
         bool v = Orig(ref);
         sl::VvsQuery("getbool", ref, v, (uintptr_t)__builtin_return_address(0));
+        if (sl::s_VvsForce >= 0 && sl::IsVvs(ref)) v = sl::s_VvsForce != 0;
         return v;
     }
 };
