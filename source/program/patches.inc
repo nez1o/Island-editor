@@ -180,6 +180,7 @@ static const PatchWord k_fences_anywhere[] = {
     {0x10f329c, 0x360006c0, 0xd503201f},   /* fence rect check 0x10f3270 (fence code only): area / ground / per-tile */
     {0x10f32a8, 0x36000660, 0xd503201f},   /*   validity skipped; the "tile already has an item" check stays, so a */
     {0x10f3300, 0x360003a0, 0xd503201f},   /*   fence never replaces another item */
+    {0x13c76f8, 0x12000109, 0x52800009},   /* editor cursor "blocked" flag => 0: the fence cursor stays blue */
 };
 
 static Feature g_Features[] = {
