@@ -3,6 +3,7 @@
 #include "nn/fs.hpp"
 #include "nn/os.hpp"
 #include "lib/nx/arm/cache.h"
+#include "lib/nx/kernel/svc.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -498,7 +499,11 @@ namespace sl {
     constexpr u32 FtrEditLayoutVtable  = 0x48a6a48;
     constexpr u32 LayoutCursor         = 0xa3c;      /* Vec3f; copies at +0xa30, +0xa48, +0xf10 */
     constexpr u32 PlayerPos            = 0x29a0;     /* player actor: live position (Vec3f) */
-    constexpr float EditMinX = 160.0f, EditMinZ = 160.0f, EditMaxX = 1280.0f, EditMaxZ = 1120.0f;
+    /* The cursor may go over the whole map, the 1-acre sea ring around the island included
+       (0..1440 x 0..1280, 10 units in from the edge). The middle stays (720, 640): the closing
+       re-centre is recognised by it. The player is only ever put back on the island grid. */
+    constexpr float EditMinX = 10.0f, EditMinZ = 10.0f, EditMaxX = 1430.0f, EditMaxZ = 1270.0f;
+    constexpr float IslandMinX = 160.0f, IslandMinZ = 160.0f, IslandMaxX = 1280.0f, IslandMaxZ = 1120.0f;
     constexpr u32 UiMgrGlobal          = 0x55b6f18;  /* the D-pad handler's UI request target */
     constexpr u32 UiRequest            = 0x2df7b98;  /* (mgr, scene id, {player index byte}, 0) */
     constexpr u32 ExteriorEditScene    = 0x6f;
@@ -517,6 +522,11 @@ namespace sl {
     static bool s_WarpArmed     = false;    /* editor has run: closing it may warp the player */
     static float s_WarpX = 0, s_WarpZ = 0;  /* cursor before closing re-centres it */
     static bool s_EditorClosed = false;     /* the editor just closed (its warp ran) */
+    static s64 s_CursorBAt = 0;             /* B pressed in the editor's cursor mode (no menu open): a real close */
+    static bool ClosedWithB() {
+        return s_CursorBAt && nn::os::GetSystemTick().GetInt64Value() - s_CursorBAt < (s64)nn::os::GetSystemTickFrequency() * 5;
+    }
+    static bool s_EditClosing = false;      /* closing: the cursor was re-centred, camera stays put */
     static bool s_EditorPending = false;    /* app tapped: open the editor once the phone is gone */
     static int s_EditorSlot     = -1;       /* app id shown as the editor (3 or 4) */
     static const char* s_DiyLabel[2] = {};  /* the DIY apps' own name labels and icon frames */
@@ -553,7 +563,9 @@ namespace sl {
 
     void EditStart(u8* layout) {
         s_WarpArmed = false;
+        s_CursorBAt = 0;
         s_EditorClosed = false;
+        s_EditClosing = false;
         s_EditLayout = layout;
         s_CursorToPlayer = EditorMap();
         if (!s_CursorToPlayer) SetCursorSpeed(layout, false);   /* rooms keep the normal speed */
@@ -568,6 +580,7 @@ namespace sl {
         if (!s_WarpArmed || layout != s_EditLayout || !LiveLayout(layout)) return;
         const Vec3f* c = reinterpret_cast<const Vec3f*>(layout + LayoutCursor);
         s_WarpX = c->x; s_WarpZ = c->z;
+        if (ClosedWithB()) s_EditClosing = true;   /* the camera keeps looking here, not at the re-centred cursor */
     }
 
     void EditCursorStart(u8* layout) {
@@ -624,10 +637,31 @@ namespace sl {
     constexpr u32 PlayerSavedPos     = 0xba4;
     constexpr u32 PlayerPosRequest   = 0x4c8;       /* -> +0x2e4..0x2e6 flags, +0x2e8 Vec3f */
 
+    /* Closing the editor puts the cursor on the area middle first; the exterior menu closing
+       (spawn menu, B) also runs the warp check, with the cursor anywhere: that is not a close. */
+    static bool CursorAtEditCentre() {
+        if (!LiveLayout(s_EditLayout)) return false;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        float mx = (EditMinX + EditMaxX) * 0.5f, mz = (EditMinZ + EditMaxZ) * 0.5f;
+        return c->x - mx > -1 && c->x - mx < 1 && c->z - mz > -1 && c->z - mz < 1;
+    }
+
     bool EditorWarpTarget(Vec3f* out) {
         if (!EditorMap() || !s_WarpArmed || !LiveLayout(s_EditLayout)) return false;
+        s64 now = nn::os::GetSystemTick().GetInt64Value();
+        if (!CursorAtEditCentre() || !ClosedWithB()) {
+            static s64 s_LastNote = 0;
+            if (now - s_LastNote > nn::os::GetSystemTickFrequency() * 2) { s_LastNote = now; Log("island editor: warp check without B in cursor mode (a menu closed) - not a close"); }
+            return false;
+        }
         s_WarpArmed = false;
-        Vec3f c = { s_WarpX, 0.0f, s_WarpZ };
+        /* The cursor may be out at sea: the player goes to the nearest spot on the island grid. */
+        float wx = s_WarpX, wz = s_WarpZ;
+        if (wx < IslandMinX + 5) wx = IslandMinX + 5;
+        if (wx > IslandMaxX - 5) wx = IslandMaxX - 5;
+        if (wz < IslandMinZ + 5) wz = IslandMinZ + 5;
+        if (wz > IslandMaxZ - 5) wz = IslandMaxZ - 5;
+        Vec3f c = { wx, 0.0f, wz };
         c.y = reinterpret_cast<float (*)(float, float*, u32*, u64)>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, &c.x, nullptr, 0);
         *out = c;
         if (s_LocalPlayer) {
@@ -643,20 +677,35 @@ namespace sl {
         return true;
     }
 
-    bool EditorWarpAllowed() { return EditorMap() && s_WarpArmed && LiveLayout(s_EditLayout); }
+    bool EditorWarpAllowed() { return EditorMap() && s_WarpArmed && s_CursorBAt && CursorAtEditCentre(); }
+
+    /* Without the game's warp: the player's live position too (EditorWarpTarget already set the
+       saved position and the position request). */
+    void EditorPlacePlayerNow(const Vec3f& c) {
+        if (!s_LocalPlayer) return;
+        *reinterpret_cast<Vec3f*>(s_LocalPlayer + PlayerPos) = c;
+        Log("island editor: placed without the warp wipe");
+    }
+
+    /* Spawn menu (further down): while it opens / is open the camera stays where the cursor was. */
+    bool SpawnCameraHold(Vec3f* out);
 
     /* Until the cursor has been moved to the player, the camera looks at the player: the first
        frames would otherwise show the corner fallback or the last session's cursor. */
 
     bool EditCameraTarget(Vec3f* out) {
         if (!EditorMap()) return false;
+        if (SpawnCameraHold(out)) return true;
         if (LiveLayout(s_EditLayout)) SetCursorSpeed(s_EditLayout, true);
         if (LiveLayout(s_EditLayout) && !s_EditOpening && !s_CursorToPlayer) {
             /* Track the cursor for the closing warp; the re-centred spot (area middle) is not one. */
             const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
             float mx = (EditMinX + EditMaxX) * 0.5f, mz = (EditMinZ + EditMaxZ) * 0.5f;
             bool centre = c->x - mx > -1 && c->x - mx < 1 && c->z - mz > -1 && c->z - mz < 1;
-            if (!s_WarpArmed || !centre) { s_WarpX = c->x; s_WarpZ = c->z; }
+            if (!s_WarpArmed || !centre) { s_WarpX = c->x; s_WarpZ = c->z; s_EditClosing = false; }
+            /* Closing (B) puts the cursor on the area middle while the edit camera still runs, which
+               swung the camera across the map for a moment (seen in Eden): it stays on the last spot. */
+            else if (s_WarpArmed && centre && ClosedWithB()) s_EditClosing = true;
             s_WarpArmed = true;
         }
         if ((s_EditOpening || s_CursorToPlayer || !LiveLayout(s_EditLayout)) && s_LocalPlayer) {
@@ -665,6 +714,7 @@ namespace sl {
         }
         if (!LiveLayout(s_EditLayout)) return false;
         *out = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        if (s_EditClosing) { out->x = s_WarpX; out->z = s_WarpZ; }   /* not the re-centred spot */
         return true;
     }
 
@@ -783,6 +833,37 @@ namespace sl {
         return *reinterpret_cast<u8**>(view + 8) + *reinterpret_cast<u64*>(view + 0x10);
     }
 
+    /* The save object (*(save root+0x10))[0] holds the live main.dat image at +0x10 and two more
+       full images: +0x18 (pointer) and +0x8 (an object with the image inline at +0x250). Save and
+       End writes from those, not from the live one, so building changes made by the module came
+       back after a reload (found live in Eden 2026-11-23: patching both copies kept a removed
+       bridge removed). The building list is copied into both after every change. Each copy is
+       only used when its first 16 bytes match the live image's header. */
+    constexpr u32 BuildingListBytes = 47 * 0x14;
+    static void SyncSaveCopies() {
+        u8* d = *reinterpret_cast<u8**>(Main(SaveRootGlobal));
+        if (!d || (d[0x453] & 1)) return;
+        u8** p3 = *reinterpret_cast<u8***>(d + 0x10);
+        u8* x = p3 ? *p3 : nullptr;
+        u8* data = x ? *reinterpret_cast<u8**>(x + 0x20) : nullptr;
+        if (!data) return;
+        u8* view = data + 0x70 + 0x116cc0;
+        u8* live = *reinterpret_cast<u8**>(view + 8);
+        u64 off = *reinterpret_cast<u64*>(view + 0x10);
+        if (!live || live != *reinterpret_cast<u8**>(x + 0x10)) return;
+        u8* inl = *reinterpret_cast<u8**>(x + 8);
+        u8* copies[2] = { *reinterpret_cast<u8**>(x + 0x18), inl ? inl + 0x250 : nullptr };
+        static int s_Warned = 0;
+        for (int i = 0; i < 2; i++) {
+            u8* c = copies[i];
+            if (!c || c == live || memcmp(c, live, 16) != 0) {
+                if (!(s_Warned & (1 << i))) { s_Warned |= 1 << i; Log("save copies: copy %d not found (%p) - not synced", i, c); }
+                continue;
+            }
+            if (memcmp(c + off, live + off, BuildingListBytes) != 0) memcpy(c + off, live + off, BuildingListBytes);
+        }
+    }
+
     static void SaveBuildingMove(u32 index, float bodyX, float bodyZ, s32 dcx, s32 dcz) {
         u8* recs = BuildingRecords();
         if (!recs) { Log("buildings: save records not found"); return; }
@@ -802,6 +883,7 @@ namespace sl {
         Log("buildings: record %d (type %d) (%d, %d) -> (%d, %d)", best, r[0], r[1], r[2], r[1] + dcx, r[2] + dcz);
         r[1] = (s16)(r[1] + dcx);
         r[2] = (s16)(r[2] + dcz);
+        SyncSaveCopies();
     }
 
     /* The island's building collision / occupied tiles, as HHP refreshes its house on grab and drop.
@@ -822,36 +904,96 @@ namespace sl {
     }
 
     static void RespawnHouse(u8* body);
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at);
+    static int StructureOfBody(u8* body);   /* 26 bridge, 27 incline, else 0 */
+    static int RemovableBuildingOfBody(u8* body);   /* a spawned shop / service copy: its type, else 0 */
+    /* Buildings tab cells (tab 7, see RemovableBuildingOfBody) */
+    s16 k_BuildingCells[] = {   /* not const: dbg pokes a type into a cell to try it */ 19, 21, 20, 24, 25, 28, 23, 29, 42, 9 };   /* Cranny, Museum, Resident Services, Able Sisters, Campsite, Redd, tent, studio, hotel, empty house */
+    constexpr int BuildingCells = sizeof(k_BuildingCells) / sizeof(k_BuildingCells[0]);
 
     /* -- component slots (x0 = component) -- */
     static void BldNoop(BldComp*) {}
 
     /* 0x20: footprint centre the way HHP reports it (z 5 in front of the body). */
+    bool SpawnPosFor(const u8* body, Vec3f* out);   /* spawn menu: the borrowed house stands at the cursor */
+
+    /* Held like furniture: while a building / bridge is held it bobs gently and glides to each new
+       cell instead of jumping (a visual offset on top of the real position, undone before anything
+       reads or changes it for real). */
+    float s_SquareDy = 0.0f;   /* square height vs the ground, live-tunable (sl::s_SquareDy): it drew over buildings */
+    static BldComp* s_HeldComp = nullptr;
+    static float s_DragOffX = 0, s_DragOffZ = -5.0f;
+    static void SquareOffset(u8* body, float* ox, float* oz);
+    static Vec3f s_HeldV = {};          /* offset applied to the parts right now */
+    static float s_GlideX = 0, s_GlideZ = 0;
+    static int s_HeldT = 0;
+    static void HeldUndo(BldComp* c) {
+        if (c != s_HeldComp) return;
+        ShiftParts(c, -s_HeldV.x, -s_HeldV.z, -s_HeldV.y);
+        s_HeldV = {};
+    }
+    static void HeldTick() {
+        BldComp* c = s_HeldComp;
+        if (!c) return;
+        if (!c->grabbed || !c->body) { s_HeldComp = nullptr; s_HeldV = {}; return; }
+        s_HeldT++;
+        s_GlideX *= 0.65f; s_GlideZ *= 0.65f;
+        if (s_GlideX > -0.05f && s_GlideX < 0.05f) s_GlideX = 0;
+        if (s_GlideZ > -0.05f && s_GlideZ < 0.05f) s_GlideZ = 0;
+        float bob = 0.8f * __builtin_sinf(s_HeldT * 0.10f);
+        Vec3f v = { s_GlideX, bob, s_GlideZ };
+        ShiftParts(c, v.x - s_HeldV.x, v.z - s_HeldV.z, v.y - s_HeldV.y);
+        s_HeldV = v;
+    }
+
     static Vec3f* BldPos(BldComp* c) {
+        Vec3f sp;
+        if (SpawnPosFor(c->body, &sp)) {
+            /* 100 under the ground: the editor's square / hand for the borrowed house showed at the
+               cursor for a moment when the spawn menu opened (Switch video) */
+            c->pos = { sp.x, reinterpret_cast<const Vec3f*>(c->body + 0x7f0)->y - 1000.0f, sp.z };   /* (100 under still showed a tiny square) */
+            return &c->pos;
+        }
         const Vec3f* p = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
-        c->pos = { p->x, p->y - (c->grabbed ? BldLift : 0.0f), p->z - 5.0f };
+        Vec3f hv = c == s_HeldComp ? s_HeldV : Vec3f{};
+        /* the square is drawn here (its size from the footprint FootOf sets): the middle of the
+           structure, not the body (sizes / offsets changed nothing while this was body z - 5) */
+        float ox, oz;
+        SquareOffset(c->body, &ox, &oz);
+        c->pos = { p->x - hv.x + ox, p->y - hv.y - (c->grabbed ? BldLift : 0.0f), p->z - hv.z + oz };
         return &c->pos;
     }
 
     /* 0x58: grab - collect the building's actors around the body. */
+    static bool RespawnPending(u8* body);
     static bool BldGrab(BldComp* c) {
         if (c->state == 1) return false;
+        /* just dropped and still being rebuilt: grabbing the old actor, which the rebuild then deleted,
+           left the hand dragging nothing (the camera followed it out to sea - Switch video) */
+        if (RespawnPending(c->body)) { Log("buildings: still rebuilding - grab ignored"); return false; }
         const Vec3f* b = reinterpret_cast<const Vec3f*>(c->body + 0x7f0);
         float bx = b->x, bz = b->z;
         c->parts = 0;
+        bool structure = StructureOfBody(c->body) != 0;
+        if (structure) {   /* a bridge / incline is its body alone (a neighbour bridge came along) */
+            c->part[0] = c->body; c->pair[0] = 0x7f0; c->parts = 1;
+        }
         ForEachActor([&](u8* a) {
             u32 pair = PartPair(a);
-            if (!pair || c->parts >= MaxDragParts) return;
+            if (structure || !pair || c->parts >= MaxDragParts) return;
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + (VtOf(a) == SignVt ? 0x160 : pair));
             float dx = p->x - bx, dz = p->z - bz;
             if (dx < -8 || dx > 8 || dz < -8 || dz > 8) return;
             c->part[c->parts] = a; c->pair[c->parts] = pair; c->parts++;
         });
         c->startX = bx; c->startZ = bz; c->dx = c->dz = 0;
+        SquareOffset(c->body, &s_DragOffX, &s_DragOffZ);   /* BldPos reports the square's middle */
         c->grabbed = 1;
         ShiftParts(c, 0, 0, BldLift);
+        s_HeldComp = c; s_HeldV = {}; s_GlideX = s_GlideZ = 0; s_HeldT = 0;
         BuildingSlot(c, false);
         Log("buildings: grabbed building at (%d, %d), %d parts", (int)bx, (int)bz, c->parts);
+        PlayEditFx(nullptr, "家具をつかむ", Vec3f{ bx, b->y, bz });   /* like grabbing furniture */
         return true;
     }
 
@@ -863,29 +1005,55 @@ namespace sl {
 
     /* 0x68: drag to pos (+8 x, +0x10 z: footprint centre, already on the editor's grid). The house
        follows it in 5-unit cells, the unit of its save record. */
+    static void SquareDims(u8* body, int fk, float* hxOut, float* hzOut, float* oxOut, float* ozOut);
     static void BldDrag(BldComp* c, const u8* pos) {
         if (!c->grabbed || !pos) return;
-        float x = *reinterpret_cast<const float*>(pos + 8), z = *reinterpret_cast<const float*>(pos + 0x10) + 5.0f;
+        float x = *reinterpret_cast<const float*>(pos + 8) - s_DragOffX, z = *reinterpret_cast<const float*>(pos + 0x10) - s_DragOffZ;
         float tx = RoundToStep(x - c->startX, 5.0f);
         float tz = RoundToStep(z - c->startZ, 5.0f);
         if (tx == c->dx && tz == c->dz) return;
         ShiftParts(c, tx - c->dx, tz - c->dz);
+        if (c == s_HeldComp) {   /* looks like it stays put, then glides over */
+            s_GlideX -= tx - c->dx; s_GlideZ -= tz - c->dz;
+            ShiftParts(c, -(tx - c->dx), -(tz - c->dz));
+            s_HeldV.x -= tx - c->dx; s_HeldV.z -= tz - c->dz;
+        }
         c->dx = tx; c->dz = tz;
     }
 
-    /* 0x70: placement check - anywhere goes on the main island. */
-    static u32 BldValid(BldComp* c, u64, const u8*) { return c->grabbed ? 1 : 0; }
+    /* Buildings are rebuilt at grass level wherever they go (seen on a Switch: a shop dragged onto
+       the beach hung in the air). Flat ground at 0 or above around (x, z): the middle and 4 points
+       <r> away. */
+    [[maybe_unused]] static bool FlatGroundAt(float x, float z, float r, float* loOut = nullptr, float* hiOut = nullptr) {
+        using HeightFn = float (*)(float, float*, u32*, u64);
+        float lo = 1e9f, hi = -1e9f;
+        for (int k = 0; k < 5; k++) {
+            float pt[3] = { x + (k == 1 ? -r : k == 2 ? r : 0.0f), 0.0f, z + (k == 3 ? -r : k == 4 ? r : 0.0f) };
+            float h = reinterpret_cast<HeightFn>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, pt, nullptr, 0);
+            if (h < lo) lo = h;
+            if (h > hi) hi = h;
+        }
+        if (loOut) *loOut = lo;
+        if (hiOut) *hiOut = hi;
+        return lo >= -0.5f && hi - lo <= 1.0f;
+    }
+
+    /* 0x70: placement check - anywhere goes on the main island (bridges may stack too). */
+    static int StructureOfBody(u8* body);
+    static u32 BldValid(BldComp* c, u64, const u8*) { return c->grabbed ? 1 : 0; }   /* SnapBuildingsToGround fixes the height */
 
     /* 0x78: drop at pos and keep it. */
     static void BldDrop(BldComp* c, const u8* pos) {
         if (!c->grabbed) return;
         BldDrag(c, pos);
+        HeldUndo(c); s_HeldComp = nullptr;
         c->grabbed = 0;
         ShiftParts(c, 0, 0, -BldLift);
         if (c->dx != 0 || c->dz != 0)
             SaveBuildingMove(*reinterpret_cast<u32*>(c->body + ActorRecordIndex), c->startX, c->startZ,
                              (s32)(c->dx / 5.0f), (s32)(c->dz / 5.0f));
         BuildingSlot(c, true);
+        PlayEditFx(nullptr, "家具をはなす", *reinterpret_cast<const Vec3f*>(c->body + 0x7f0));   /* like dropping furniture */
         if (c->dx == 0 && c->dz == 0) return;
         Log("buildings: dropped, moved by (%d, %d)", (int)c->dx, (int)c->dz);
         RespawnHouse(c->body);   /* rebuilt at the new spot: ground height, door, etc. */
@@ -894,12 +1062,20 @@ namespace sl {
     /* 0x60: put back. */
     static void BldCancel(BldComp* c) {
         if (!c->grabbed) return;
+        HeldUndo(c); s_HeldComp = nullptr;
         ShiftParts(c, -c->dx, -c->dz, -BldLift);
         c->dx = c->dz = 0;
         c->grabbed = 0;
         BuildingSlot(c, true);
         Log("buildings: put back");
     }
+
+    /* 0xb0: "can be removed" - the editor shows its own "Y Remove" for the hovered object when this
+       says yes (found live by flipping the slots). Yes only for bridges / inclines, never while a
+       spawn menu (opened on a borrowed house) is involved: with yes on every building the editor got
+       stuck after a spawn menu closed. Y itself is handled in EditorPad, which hides it from the game. */
+    bool SpawnBusy();
+    static u32 BldCanRemove(BldComp* c) { return c && c->body && !SpawnBusy() && (StructureOfBody(c->body) || RemovableBuildingOfBody(c->body)) ? 1 : 0; }
 
     static void InitBldVtable() {
         if (s_BldVt[0]) return;
@@ -913,6 +1089,8 @@ namespace sl {
         s_BldVt[0x68 / 8] = reinterpret_cast<const void*>(&BldDrag);
         s_BldVt[0x70 / 8] = reinterpret_cast<const void*>(&BldValid);
         s_BldVt[0x78 / 8] = reinterpret_cast<const void*>(&BldDrop);
+        s_BldVt[0xb0 / 8] = reinterpret_cast<const void*>(&BldCanRemove);
+
     }
 
     static bool CompInUse(BldComp& c) {
@@ -950,16 +1128,436 @@ namespace sl {
     constexpr float BridgeReach = 28.0f;   /* a bridge is up to 5 tiles long: hover within this of its middle */
     constexpr float InclineReach = 18.0f;
 
+    /* ---- Spawn menu (D-pad left in the island editor) - TEST stage 1: open only ----
+       The exterior menu is a UI sequence the editor starts on X with the hovered building. D-pad left
+       in cursor mode arms a spawn: for a moment the hover answers a house even where there is none,
+       and an X press is fed in, so the editor opens the menu as usual; it then starts on the Bridges
+       tab and its picks are only logged (house design changes are blocked). */
+    static s64 s_SpawnAt = 0;            /* tick of the D-pad left press (0 = none) */
+    static bool s_SpawnArmed = false;    /* the next menu open is a spawn menu */
+    static bool s_SpawnMode = false;     /* the open menu is a spawn menu */
+    static s64 s_CursorQueryTick = 0;    /* last hover query: the editor's cursor mode is running */
+    static s64 NowTick() { return nn::os::GetSystemTick().GetInt64Value(); }
+    static s64 MsTicks(int ms) { return nn::os::GetSystemTickFrequency() * ms / 1000; }
+    static bool SpawnWithin(int fromMs, int toMs) {
+        if (!s_SpawnAt) return false;
+        s64 d = NowTick() - s_SpawnAt;
+        return d >= MsTicks(fromMs) && d < MsTicks(toMs);
+    }
+
+    static Vec3f s_SpawnCam = {};        /* cursor when D-pad left was pressed */
+    static u32 s_HoverHandle = 0;        /* bridge / incline under the cursor (last hover lookup), or 0 */
+    bool RemoveStructure(u8* body);
+    static u8* s_SpawnBody = nullptr;    /* the house borrowed to open the menu on */
+    bool SpawnBusy() { return s_SpawnArmed || s_SpawnMode; }
+
+    /* The menu frames its building: while spawning, the borrowed house reports the cursor's spot. */
+    bool SpawnPosFor(const u8* body, Vec3f* out) {
+        if (!body || body != s_SpawnBody || !(s_SpawnArmed || s_SpawnMode) || !out) return false;
+        *out = s_SpawnCam;
+        return true;
+    }
+
+    /* The editor's per-frame house hover (0x13cfd7c) runs every frame in cursor mode, also with
+       the cursor standing still (the hover lookups only run while it moves). */
+    void CursorHeartbeat() { s_CursorQueryTick = NowTick(); }
+
+    /* The menu opens on the borrowed house, which made the edit camera fly to it: keep it here. */
+    bool SpawnCameraHold(Vec3f* out) {
+        /* No menu came of the D-pad press: stop holding (the camera stayed put while the cursor left). */
+        if (s_SpawnArmed && !SpawnWithin(0, 800)) { s_SpawnArmed = false; s_SpawnBody = nullptr; Log("spawn menu: did not open"); }
+        if (!(s_SpawnArmed || s_SpawnMode) || !out) return false;
+        /* The cursor moves again (menu closed, its close was missed): the camera follows it again. */
+        if (s_SpawnMode && LiveLayout(s_EditLayout)) {
+            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            float dx = c->x - s_SpawnCam.x, dz = c->z - s_SpawnCam.z;
+            if (dx * dx + dz * dz > 12.0f * 12.0f) {
+                s_SpawnMode = false; s_SpawnBody = nullptr;
+                Log("spawn menu: closed (cursor moved)");
+                return false;
+            }
+        }
+        *out = s_SpawnCam;
+        return true;
+    }
+
+    /* 0x7d10d4: the edit camera's point = look-at (0x7f9070) + an offset at *(cam+8)+0x30920. The
+       exterior menu zooms in on its house; while it is a spawn menu the camera keeps the offset it
+       had before the menu (logged when it changes, to confirm this is the zoom). */
+    static Vec3f s_CamOffset = {};
+    static bool s_CamOffsetSet = false;
+    void EditCameraPoint(u8* cam, Vec3f* out) {
+        if (!cam || !out || !EditorMap()) return;
+        u8* inner = *reinterpret_cast<u8**>(cam + 8);
+        if (!inner) return;
+        Vec3f off = *reinterpret_cast<const Vec3f*>(inner + 0x30920);
+        static Vec3f s_Logged = {};
+        static int s_Logs = 0;
+        float ch = (off.x - s_Logged.x) * (off.x - s_Logged.x) + (off.y - s_Logged.y) * (off.y - s_Logged.y) +
+                   (off.z - s_Logged.z) * (off.z - s_Logged.z);
+        if (ch > 0.25f && s_Logs < 80) {
+            s_Logs++; s_Logged = off;
+            Log("camera: offset (%d, %d, %d)%s", (int)(off.x * 10), (int)(off.y * 10), (int)(off.z * 10),
+                (s_SpawnArmed || s_SpawnMode) ? " - spawn menu, kept" : "");
+        }
+        if (s_SpawnArmed || s_SpawnMode) {
+            if (!s_CamOffsetSet) return;
+            out->x += s_CamOffset.x - off.x;
+            out->y += s_CamOffset.y - off.y;
+            out->z += s_CamOffset.z - off.z;
+            return;
+        }
+        s_CamOffset = off;
+        s_CamOffsetSet = true;
+    }
+
+    /* 0x7cfa20: the edit camera's second delegate (beside the look-at point 0x7d10d4): a Vec3 that
+       blends zoom presets (*(x0+8)+0x315e4 = preset index). Spawn menu: the value from before it. */
+    static Vec3f s_CamZoom = {};
+    static bool s_CamZoomSet = false;
+    static u8* s_DbgCam = nullptr;      /* edit camera controller, for the debug channel */
+
+    /* The exterior menu zooms onto its house by switching the camera's state machine (camera+0x408,
+       current state at +0x410) from the editor camera (0x13) to CamState::cDemo (0x22), through the
+       generic change-state 0x3dbb160 (found live: camera snapshot diff around the menu opening). A spawn
+       menu's house is only borrowed, so the camera stays the editor's. */
+    bool BlockCameraState(u8* sm, u32 state) {
+        if (state != 0x22 || !s_DbgCam || sm != s_DbgCam + 0x408 || !EditorMap()) return false;
+        if (!(s_SpawnArmed || s_SpawnMode)) return false;
+        Log("spawn menu: close-up camera skipped");
+        return true;
+    }
+    void DbgApplyHolds();
+    void EditCameraZoom(u8* self, Vec3f* v) {
+        if (!self || !v || !EditorMap()) return;
+        u8* cam = *reinterpret_cast<u8**>(self + 8);
+        s_DbgCam = cam;
+        DbgApplyHolds();
+        /* Diagnostic: which camera fields does the spawn menu change? Snapshot on D-pad left, diff
+           1.2 s later (values that moved, at most 80 lines). */
+        constexpr u32 SnapSize = 0x38000;
+        alignas(16) static u8 s_Snap[SnapSize];
+        static s64 s_SnapAt = 0;
+        static bool s_Diffed = true;
+        if (cam && s_SpawnAt && s_SpawnAt != s_SnapAt && SpawnWithin(0, 50)) {
+            memcpy(s_Snap, cam, SnapSize);
+            s_SnapAt = s_SpawnAt; s_Diffed = false;
+            Log("camera: snapshot at D-pad left (cam %lx)", (unsigned long)(uintptr_t)cam);
+        }
+        if (cam && !s_Diffed && s_SnapAt == s_SpawnAt && !SpawnWithin(0, 1200)) {
+            s_Diffed = true;
+            int n = 0;
+            for (u32 o = 0; o + 4 <= SnapSize && n < 80; o += 4) {
+                u32 ia = *reinterpret_cast<const u32*>(s_Snap + o), ib = *reinterpret_cast<const u32*>(cam + o);
+                if (ia == ib) continue;
+                float a = *reinterpret_cast<const float*>(s_Snap + o), b = *reinterpret_cast<const float*>(cam + o);
+                bool fa = (ia & 0x7f800000) != 0x7f800000 && (a > 1e-4f || a < -1e-4f) && a < 1e5f && a > -1e5f;
+                bool fb = (ib & 0x7f800000) != 0x7f800000 && (b > 1e-4f || b < -1e-4f) && b < 1e5f && b > -1e5f;
+                if (fa || fb) {
+                    float d = a - b; if (d < 0) d = -d;
+                    if (d < 0.05f) continue;
+                    Log("camera: +%x  %d -> %d (/100)", o, (int)(a * 100), (int)(b * 100));
+                } else if (ia < 0x10000 && ib < 0x10000) {
+                    Log("camera: +%x  int %d -> %d", o, (int)ia, (int)ib);
+                } else continue;
+                n++;
+            }
+            Log("camera: diff done, %d changes listed", n);
+        }
+        static Vec3f s_Logged = {};
+        static int s_Logs = 0;
+        float ch = (v->x - s_Logged.x) * (v->x - s_Logged.x) + (v->y - s_Logged.y) * (v->y - s_Logged.y) +
+                   (v->z - s_Logged.z) * (v->z - s_Logged.z);
+        if (ch > 0.01f && s_Logs < 120) {
+            s_Logs++; s_Logged = *v;
+            Log("camera: zoom (%d, %d, %d) /100, preset %d, t %d%s", (int)(v->x * 100), (int)(v->y * 100), (int)(v->z * 100),
+                cam ? *reinterpret_cast<s32*>(cam + 0x315e4) : -1, (int)(*reinterpret_cast<float*>(self + 0x10) * 100),
+                (s_SpawnArmed || s_SpawnMode) ? " - spawn menu, kept" : "");
+        }
+        if (s_SpawnArmed || s_SpawnMode) {
+            if (s_CamZoomSet) *v = s_CamZoom;
+            return;
+        }
+        s_CamZoom = *v;
+        s_CamZoomSet = true;
+    }
+
+    bool ReshapeStructure(u8* body, bool rotate, bool resize);
+
+    /* The bridge / incline nearest the cursor, within its reach (the hover lookup runs for several
+       cells, so its last answer is not always the one under the cursor). */
+    static u8* NearestStructure() {
+        if (!LiveLayout(s_EditLayout)) return nullptr;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8* body = nullptr;
+        float best = 1e9f;
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            int kind = StructureOfBody(a);
+            if (!kind) return;
+            float reach = kind == 26 ? BridgeReach : InclineReach;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
+            if (d < reach * reach && d < best) { best = d; body = a; }
+        });
+        return body;
+    }
+
+    /* For Y: the nearest bridge / incline, or a spawned shop / service copy (within 30 of its middle). */
+    constexpr float BuildingReach = 30.0f;
+    static u8* NearestRemovable() {
+        if (!LiveLayout(s_EditLayout)) return nullptr;
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8* body = nullptr;
+        float best = 1e9f;
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            int kind = StructureOfBody(a);
+            float reach = kind == 26 ? BridgeReach : kind == 27 ? InclineReach : RemovableBuildingOfBody(a) ? BuildingReach : 0.0f;
+            if (reach <= 0.0f) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float d = (p->x - c->x) * (p->x - c->x) + (p->z - c->z) * (p->z - c->z);
+            if (d < reach * reach && d < best) { best = d; body = a; }
+        });
+        return body;
+    }
+
+    /* Quick start (sai: "skip the game opening"): from boot until the player is first on the island,
+       A is pressed for you (100 ms every 600 ms, from 3 s after boot, at most 3 minutes): the title
+       screen and the notices after it go by without waiting. Off with quick_start=0. */
+    static bool s_QuickStart = true;   /* toggles.txt "quick_start" */
+    void QuickStartPad(void* states, int count) {
+        static s64 s_Boot = 0;
+        static bool s_Done = false;
+        if (s_Done || !states || count <= 0) return;
+        s64 now = NowTick();
+        if (!s_Boot) s_Boot = now;
+        if (s_LocalPlayer || !s_QuickStart || now - s_Boot > MsTicks(180000)) {
+            s_Done = true;
+            Log("quick start: done (%s)", s_LocalPlayer ? "on the island" : !s_QuickStart ? "off" : "timed out");
+            return;
+        }
+        s64 t = now - s_Boot - MsTicks(3000);
+        if (t < 0 || t % MsTicks(600) >= MsTicks(100)) return;
+        u8* s = reinterpret_cast<u8*>(states);
+        for (int i = 0; i < count && i < 16; i++) *reinterpret_cast<u64*>(s + i * 0x28 + 8) |= 1ull;
+    }
+
+    /* Controller reads (all of them pass here): D-pad left -> spawn; X fed in 60..110 ms later. */
+    void EditorPad(void* states, int count) {
+        if (!states || count <= 0 || !EditorMap() || s_EditClosing) return;
+        u8* s = reinterpret_cast<u8*>(states);
+        u64 newest = *reinterpret_cast<u64*>(s + 8);
+        static bool s_LeftWas = false;
+        bool left = (newest >> 12) & 1;
+        bool cursorMode = s_CursorQueryTick && NowTick() - s_CursorQueryTick < MsTicks(150);
+        if (cursorMode && s_SpawnMode) { s_SpawnMode = false; s_SpawnBody = nullptr; Log("spawn menu: closed"); }
+        if (left && !s_LeftWas && cursorMode && !SpawnWithin(0, 400)) {
+            s_SpawnAt = NowTick();
+            s_SpawnArmed = true;
+            if (LiveLayout(s_EditLayout)) s_SpawnCam = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            Log("spawn menu: D-pad left");
+        }
+        s_LeftWas = left;
+        /* B in cursor mode closes the editor; B in a menu only closes the menu (the game runs its
+           closing warp check for both, with the cursor on the area middle). */
+        static bool s_BWas = false;
+        bool bBtn = (newest >> 1) & 1;
+        if (bBtn && !s_BWas) s_CursorBAt = cursorMode && !SpawnBusy() ? NowTick() : 0;
+        s_BWas = bBtn;
+        /* Y on a hovered bridge / incline removes it (like Y on an item). */
+        static bool s_YWas = false;
+        bool y = (newest >> 3) & 1;
+        /* Y removes, ZL turns (quarter turn), ZR resizes the bridge / incline nearest the cursor;
+           those presses are then hidden from the game (it has its own Y path for removable objects). */
+        static bool s_ZlWas = false, s_ZrWas = false;
+        bool zl = (newest >> 8) & 1, zr = (newest >> 9) & 1;
+        u64 hide = 0;
+        static bool s_Hiding[3] = {};   /* decided on the press (before a removal), kept while held */
+        bool near = cursorMode && !SpawnBusy() && (((y && !s_YWas) && NearestRemovable()) || (((zl && !s_ZlWas) || (zr && !s_ZrWas)) && NearestStructure()));
+        if (y && !s_YWas) s_Hiding[0] = near;
+        if (zl && !s_ZlWas) s_Hiding[1] = near;
+        if (zr && !s_ZrWas) s_Hiding[2] = near;
+        if (cursorMode && !SpawnBusy() && LiveLayout(s_EditLayout) && ((y && !s_YWas) || (zl && !s_ZlWas) || (zr && !s_ZrWas))) {
+            u8* body = (y && !s_YWas) ? NearestRemovable() : NearestStructure();
+            if (!body) {
+                const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+                Log("structures: no bridge or incline near the cursor (%d, %d)", (int)c->x, (int)c->z);
+            } else if (y && !s_YWas) {
+                if (RemoveStructure(body)) s_HoverHandle = 0;
+            } else {
+                /* at most one turn / resize per 0.35 s: holding the button turned the bridge ~50 times
+                   (the hidden presses read as new ones) */
+                static s64 s_LastReshape = 0;
+                if (NowTick() - s_LastReshape >= MsTicks(350)) {
+                    s_LastReshape = NowTick();
+                    if (zl && !s_ZlWas) ReshapeStructure(body, true, false);
+                    else ReshapeStructure(body, false, true);
+                }
+            }
+        }
+        /* A tapped (released within 0.3 s, not grabbed) on a bridge / incline you spawned: a quarter
+           turn, like tapping A on furniture (holding A still grabs) */
+        {
+            static bool s_AWas = false;
+            static s64 s_ADown = 0;
+            static u32 s_ABody = 0;
+            bool aBtn = newest & 1;
+            if (aBtn && !s_AWas) {
+                u8* nb = cursorMode && !SpawnBusy() ? NearestStructure() : nullptr;
+                s_ABody = nb ? *reinterpret_cast<u32*>(nb + 0x230) : 0;
+                s_ADown = NowTick();
+            }
+            if (!aBtn && s_AWas && s_ABody && NowTick() - s_ADown < MsTicks(300)) {
+                u8* nb = ActorOfHandle(s_ABody);
+                BldComp* cc = nb ? CompOf(nb) : nullptr;
+                if (nb && !(cc && cc->grabbed)) ReshapeStructure(nb, true, false);
+            }
+            if (!aBtn) s_ABody = 0;
+            s_AWas = aBtn;
+        }
+        if (!y) s_Hiding[0] = false;
+        if (!zl) s_Hiding[1] = false;
+        if (!zr) s_Hiding[2] = false;
+        if (s_Hiding[0]) hide |= 1ull << 3;
+        if (s_Hiding[1]) hide |= 1ull << 8;
+        if (s_Hiding[2]) hide |= 1ull << 9;
+        if (hide) for (int i = 0; i < count && i < 16; i++) *reinterpret_cast<u64*>(s + i * 0x28 + 8) &= ~hide;
+        s_ZlWas = zl; s_ZrWas = zr;
+        s_YWas = y;
+        if (!SpawnWithin(0, 400)) return;
+        bool feedX = SpawnWithin(60, 110);
+        for (int i = 0; i < count && i < 16; i++) {
+            u64* b = reinterpret_cast<u64*>(s + i * 0x28 + 8);
+            *b &= ~(1ull << 12);                 /* the D-pad left press itself does nothing else */
+            if (feedX) *b |= 1ull << 2;          /* X */
+        }
+    }
+
+    /* The highlight square from the structure itself (sai: "match automatically"): centre = the body
+       plus an offset, size per kind (bridges by their length), turned by the record's rotation, written
+       over the rect the game made (cells of 5 units: +0x10 x0, +0x14 z0, +0x20 x1, +0x24 z1, inclusive).
+       Half sizes / offsets in world units at rotation 0, tunable live (sl::s_Dim): [0] houses / shops,
+       [1] bridges (half length = base + per-tile x length), [2] inclines, [3] diagonal bridges. */
+    struct FootTune { s32 tx, tz; float dx, dy, dz; };
+    FootTune s_Foot[3] = { { 3, 3, -3, 0, -3 }, { 3, 3, -3, 0, -3 }, { 3, 3, 0, 0, 0 } };   /* not static: dbg finds it by symbol */
+    struct DimTune { float hx, hz, ox, oz, perTile; };
+    DimTune s_Dim[4] = { { 21, 22, 0, -22, 0 }, { 5, 15, 0, 0, 5 }, { 20, 17.5f, 0, -5, 0 }, { 10, 10, 0, 0, 5 } };
+    /* Houses / shops: one size per record type (sai's player house and a villager house differ):
+       half sizes and the middle's offset from the body, world units, tunable live (sl::s_TypeDim,
+       index = record type, 4 floats each). 0 = use s_Dim[0]. */
+    struct TypeDim { float hx, hz, ox, oz; };
+    /* measured from sai's straight-down screenshots (2026-11-26): player houses, villager houses,
+       Nook's Cranny 19, Resident Services 20, Museum 21, Able Sisters 24, campsite 25 */
+    TypeDim s_TypeDim[48] = {
+        {}, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 },
+        { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 }, { 26, 21, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 21.5f, 22, 0, -5 }, { 21.5f, 22, 0, -5 },
+        { 34, 29, 0, -5 }, { 29.5f, 28, 0, -5 }, { 36, 29, 0, -5 }, {}, {}, { 24, 24, 0, 5 },   /* Able Sisters: a tile further forward (live on a Switch) */
+        { 21, 25, 0, -5 } };
+    static s16* RecordOfBody(u8* body) {
+        u8* recs = BuildingRecords();
+        u32 i = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        return recs && i < 47 ? reinterpret_cast<s16*>(recs + i * 0x14) : nullptr;
+    }
+    static bool BridgeLook(u16 id, int* mat, int* shape);
+    /* The square's half sizes and middle offset for a body, already turned by its record's rotation. */
+    static void SquareDims(u8* body, int fk, float* hxOut, float* hzOut, float* oxOut, float* ozOut) {
+        int rot = 0, shape = 0;
+        if (s16* r = RecordOfBody(body)) {
+            rot = r[3] & 3;
+            int m;
+            if (fk == 1 && !BridgeLook((u16)r[4], &m, &shape)) shape = 0;
+        }
+        /* the record's rotation isn't always 0-3 (4 seen on an incline, a bridge across the screen read
+           0): the body's own angle (+0x2b4 of its transform, a full turn = 2^32) is what's drawn */
+        if (u8* xf = *reinterpret_cast<u8**>(body + ActorTransform)) {
+            u32 ang = *reinterpret_cast<u32*>(xf + 0x2b4);
+            rot = (int)(((ang + 0x20000000u) >> 30) & 3);
+        }
+        if (fk == 0) if (s16* r = RecordOfBody(body)) { if (r[0] == 26) fk = 1; else if (r[0] == 27) fk = 2; }
+        int dk = fk == 1 && shape >= 3 ? 3 : fk;
+        DimTune d = s_Dim[dk];
+        if (fk == 0) if (s16* r = RecordOfBody(body)) if (r[0] > 0 && r[0] < 48 && s_TypeDim[r[0]].hx > 0) {
+            const TypeDim& t = s_TypeDim[r[0]];
+            d.hx = t.hx; d.hz = t.hz; d.ox = t.ox; d.oz = t.oz; d.perTile = 0;
+        }
+        float len = (float)((shape % 3) + 3);            /* bridges: 3 / 4 / 5 tiles */
+        float hx = d.hx + (fk == 1 ? d.perTile * len : 0.0f), hz = d.hz + (dk == 3 ? d.perTile * len : 0.0f);
+        float ox = d.ox, oz = d.oz;
+        for (int k = 0; k < rot; k++) { float t = hx; hx = hz; hz = t; t = ox; ox = -oz; oz = t; }
+        *hxOut = hx; *hzOut = hz; *oxOut = ox; *ozOut = oz;
+    }
+    /* Square middle minus the body position, rounded so the middle sits on the 5-unit grid. */
+    static void SquareOffset(u8* body, float* oxOut, float* ozOut) {
+        *oxOut = 0; *ozOut = -5.0f;
+        Vec3f sp;
+        if (!body || SpawnPosFor(body, &sp)) return;
+        int k = StructureOfBody(body);
+        float hx, hz, ox, oz;
+        SquareDims(body, k == 26 ? 1 : k == 27 ? 2 : 0, &hx, &hz, &ox, &oz);
+        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        auto r5 = [](float v) { return (float)(s32)__builtin_floorf(v / 5.0f + 0.5f) * 5.0f; };
+        *oxOut = r5(p->x + ox) - p->x;
+        *ozOut = r5(p->z + oz) - p->z;
+    }
+    static void FootOf(u8* body, int fk, s32* txOut, s32* tzOut, Vec3f* pos) {
+        const Vec3f* p = reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        {   /* which body / record the square is for, once per change (inclines didn't take their size) */
+            static u8* s_LastBody = nullptr;
+            if (body != s_LastBody) {
+                s_LastBody = body;
+                s16* rr = RecordOfBody(body);
+                u8* xf = *reinterpret_cast<u8**>(body + ActorTransform);
+                float lhx, lhz, lox, loz;
+                SquareDims(body, fk, &lhx, &lhz, &lox, &loz);
+                Log("square: body %p rec %d type %d rot %d ang %x kind %d at %d %d half %d %d off %d %d", body, (int)*reinterpret_cast<u32*>(body + ActorRecordIndex),
+                    rr ? rr[0] : -1, rr ? rr[3] : -1, xf ? *reinterpret_cast<u32*>(xf + 0x2b4) : 0, fk, (int)p->x, (int)p->z,
+                    (int)lhx, (int)lhz, (int)lox, (int)loz);
+            }
+        }
+        float hx, hz, ox, oz;
+        SquareDims(body, fk, &hx, &hz, &ox, &oz);
+        /* The game's rect (0x2a85468): W = +0x5b8 + 1 tiles (with +0x5a8 = 0), D = +0x5bc + 1 tiles
+           (with +0x5ac = 1), first tile = floor((pos - 5*W + 5) / 10), so its middle is a tile middle
+           for odd sizes and a tile line for even ones: no offset can move it less than a tile. So the
+           middle wanted is rounded to 5 units and the size whose parity puts the square's middle there
+           exactly is used (the nearer of the two, the bigger on a tie). Sizes are not turned by the
+           game: hx / hz are already turned above. */
+        float cx = p->x + ox, cz = p->z + oz;
+        auto pick = [](float half, float& c) -> s32 {
+            float raw = half / 5.0f;                       /* tiles */
+            s32 c5 = (s32)(c / 5.0f + (c >= 0 ? 0.5f : -0.5f));
+            c = c5 * 5.0f;
+            bool odd = (c5 & 1) != 0;                      /* middle of a tile -> odd width */
+            s32 lo = (s32)raw, hi = lo + 1;
+            if (((lo & 1) != 0) != odd) lo--;
+            if (((hi & 1) != 0) != odd) hi++;
+            if (lo < 1) return hi;
+            if (hi > 5) return lo;                         /* the game draws no square wider than 5 tiles (sai's house at 6) */
+            return raw - lo < hi - raw ? lo : hi;
+        };
+        s32 w = pick(hx, cx), dz = pick(hz, cz);
+        *txOut = w - 1;
+        *tzOut = dz - 1;
+        pos->x = cx; pos->z = cz; pos->y += s_Foot[fk].dy;
+    }
     u32 BuildingAtCell(const u8* query, u8* out, u8* minOut) {
+        s_CursorQueryTick = NowTick();
         float cx = *reinterpret_cast<const s32*>(query + 8) * 5.0f + 2.5f;
         float cz = *reinterpret_cast<const s32*>(query + 0xc) * 5.0f + 2.5f;
         u8* body = nullptr;
-        ForEachActor([&](u8* a) {
+        /* D-pad left just pressed: always the borrowed house (a bridge next to the cursor got the menu,
+           which then wasn't a spawn menu and the pick was dropped - Switch video) */
+        bool spawning = s_SpawnArmed && SpawnWithin(0, 300);
+        if (!spawning) ForEachActor([&](u8* a) {
             if (body || VtOf(a) != BuildingBodyVt || IsBridgeBody(a)) return;
             const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
             if (cx >= p->x - 20 && cx < p->x + 20 && cz >= p->z - 25 && cz < p->z + 25) body = a;
         });
-        if (!body) {   /* bridges and inclines (building bodies too): near their middle */
+        if (!body && !spawning) {   /* bridges and inclines (building bodies too): near their middle */
             float best = 1e9f;
             ForEachActor([&](u8* a) {
                 if (VtOf(a) != BuildingBodyVt) return;
@@ -971,11 +1569,40 @@ namespace sl {
                 if (d < reach * reach && d < best) { best = d; body = a; }
             });
         }
+        s_HoverHandle = body && StructureOfBody(body) ? *reinterpret_cast<u32*>(body + 0x230) : 0;
+        if (!body && spawning) {   /* spawn: borrow any house to open the menu on */
+            ForEachActor([&](u8* a) {
+                if (!body && VtOf(a) == BuildingBodyVt && !IsBridgeBody(a) && !StructureOfBody(a) && !RemovableBuildingOfBody(a)) body = a;
+            });
+            s_SpawnBody = body;
+        }
         if (!body) return 0;
         BldComp* c = AttachComp(body);
         if (!c) return 0;
+        /* the borrowed house's footprint (4x4 tiles) showed as a big square at the cursor for a moment
+           when D-pad left was pressed (Switch video): one tile while it's only borrowed */
+        /* Footprint (last tile index in x / z) and the square's offset per kind, tunable live with dbg
+           poke (sl::s_Foot): [0] houses / shops, [1] bridges, [2] inclines. */
+        int fk = StructureOfBody(body) == 26 ? 1 : StructureOfBody(body) == 27 ? 2 : 0;   /* 26 bridge, 27 incline */
+        bool borrowed = body == s_SpawnBody && (s_SpawnArmed || s_SpawnMode);
+        /* The square the editor draws is the footprint (owner +0x5b8 / +0x5bc: last TILE index, 10
+           units each, before turning) placed at the position given below, turned by the transform's
+           rotation. (Writing the cell rect afterwards changed nothing on screen.) Size and middle come
+           from FootOf (per kind / record type, measured from screenshots). */
+        Vec3f fp = *BldPos(c);
+        if (borrowed) {
+            *reinterpret_cast<s32*>(c->owner + 0x5b8) = 0;
+            *reinterpret_cast<s32*>(c->owner + 0x5bc) = 0;
+        } else {
+            s32 tx, tz;
+            FootOf(body, fk, &tx, &tz, &fp);
+            *reinterpret_cast<s32*>(c->owner + 0x5a8) = 0;   /* see FootOf: W = tx + 1, D = tz + 1 */
+            *reinterpret_cast<s32*>(c->owner + 0x5ac) = 1;
+            *reinterpret_cast<s32*>(c->owner + 0x5b8) = tx;
+            *reinterpret_cast<s32*>(c->owner + 0x5bc) = tz;
+        }
         struct { uintptr_t vt; Vec3f pos; u32 rot; u32 zero; } at = {
-            *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, *BldPos(c),
+            *reinterpret_cast<uintptr_t*>(Main(PosVtableGot)) + 0x10, fp,
             *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(body + ActorTransform) + 0x2b4), 0 };
         using RectFn = void (*)(BldComp*, u8*, void*);
         if (out) reinterpret_cast<RectFn>(Main(BldRectFull))(c, out, &at);
@@ -993,7 +1620,9 @@ namespace sl {
         u32 item[2] = { 0xfffe, 0 };
         reinterpret_cast<void (*)(u32*)>(Main(ItemNoneInit))(item);
         *reinterpret_cast<float*>(query + 0x28) = (x0 * 5.0f + x1 * 5.0f + 5.0f) * 0.5f;
-        *reinterpret_cast<float*>(query + 0x2c) = 0;
+        /* height of the highlight: was 0 (under the cliff-level ground at 15); the body's height +
+           s_SquareDy (live-tunable) - sai: the square drew over the building */
+        *reinterpret_cast<float*>(query + 0x2c) = reinterpret_cast<const Vec3f*>(body + 0x7f0)->y + s_SquareDy;
         *reinterpret_cast<float*>(query + 0x30) = (z0 * 5.0f + z1 * 5.0f + 5.0f) * 0.5f;
         *reinterpret_cast<u32*>(query + 0x34) = rot;
         *reinterpret_cast<u32*>(query + 0x38) = 0;
@@ -1100,6 +1729,12 @@ namespace sl {
     constexpr int MaxRespawns = 4;
     struct Respawn { u32 idx; u32 newBody; u32 old[MaxDragParts + 1]; int oldCount; int frames; bool dirty; };
     static Respawn s_Respawns[MaxRespawns] = { { 0xffffffff }, { 0xffffffff }, { 0xffffffff }, { 0xffffffff } };
+    static bool RespawnPending(u8* body) {
+        if (!body) return false;
+        u32 idx = *reinterpret_cast<u32*>(body + ActorRecordIndex);
+        for (const Respawn& r : s_Respawns) if (r.idx != 0xffffffff && r.idx == idx) return true;
+        return false;
+    }
 
     static bool HouseNear(u8* a, const Vec3f& b, u32* pairOut) {
         u32 pair = PartPair(a);
@@ -1465,7 +2100,30 @@ namespace sl {
     }
 
     /* Every frame: finish rebuilds whose new body has spawned its parts. */
+    /* A dropped bridge / incline lands with a little bounce, like furniture: once its rebuilt body is
+       there, its height follows these offsets for a few frames. */
+    static u32 s_BounceH = 0;
+    static int s_BounceF = -1;
+    static float s_BounceBase = 0.0f;
+    static const float k_Bounce[] = { 2.0f, 3.5f, 4.0f, 3.5f, 2.2f, 0.6f, -0.8f, -0.6f, 0.3f, 0.6f, 0.2f, 0.0f };
+    static void BounceTick() {
+        if (s_BounceF < 0) return;
+        u8* b = ActorOfHandle(s_BounceH);
+        if (!b) { s_BounceF = -1; return; }
+        if (s_BounceF == 0) s_BounceBase = reinterpret_cast<Vec3f*>(b + 0x7f0)->y;
+        float y = s_BounceBase + k_Bounce[s_BounceF];
+        reinterpret_cast<Vec3f*>(b + 0x7f0)->y = y;
+        reinterpret_cast<Vec3f*>(b + 0x7fc)->y = y;
+        if (++s_BounceF >= (int)(sizeof(k_Bounce) / sizeof(k_Bounce[0]))) s_BounceF = -1;
+    }
+
+    void ShrinkTick();
+    void TurnPopTick();
     void BuildingTick() {
+        HeldTick();
+        TurnPopTick();
+        ShrinkTick();
+        BounceTick();
         CliffStackTick();
         UnlockTick();
         using DelFn = void (*)(u8*);
@@ -1473,7 +2131,16 @@ namespace sl {
             if (r.idx == 0xffffffff) continue;
             r.frames++;
             u8* nb = ActorOfHandle(r.newBody);
+            if (!nb) {   /* the spawner's handle doesn't always resolve (seen with bridges): the record's body that isn't an old one */
+                ForEachActor([&](u8* a) {
+                    if (nb || VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != r.idx) return;
+                    u32 h = *reinterpret_cast<u32*>(a + 0x230);
+                    for (int i = 0; i < r.oldCount; i++) if (r.old[i] == h) return;
+                    nb = a;
+                });
+            }
             bool ready = r.frames >= 150;
+            if (nb && r.frames >= 2 && StructureOfBody(nb)) ready = true;   /* a bridge / incline is its body alone: a duplicate showed for ~3 s */
             if (nb && r.frames >= 4) {
                 const Vec3f b = *reinterpret_cast<const Vec3f*>(nb + 0x7f0);
                 int fresh = 0;
@@ -1486,6 +2153,7 @@ namespace sl {
                 if (fresh > 0 || r.frames >= 90) ready = true;
             }
             if (!ready) continue;
+            if (nb && StructureOfBody(nb)) { s_BounceH = *reinterpret_cast<u32*>(nb + 0x230); s_BounceF = 0; }
             for (int i = 0; i < r.oldCount; i++)
                 if (u8* a = ActorOfHandle(r.old[i])) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
             r.idx = 0xffffffff;
@@ -1497,6 +2165,7 @@ namespace sl {
     bool BridgeDesignGet(u32 handle);
 
     bool HouseDesignGet(u8* out, u32 handle) {
+        if (s_SpawnArmed) { s_SpawnArmed = false; s_SpawnMode = true; Log("spawn menu: opened (handle %x)", handle); }
         HouseExt e;
         if (!out || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return out && BridgeDesignGet(handle);
         BridgeDesignGet(0);   /* a house: not on a bridge */
@@ -1512,6 +2181,7 @@ namespace sl {
     bool MenuOnBridge();
 
     bool HouseDesignSet(u32 handle, const u8* design) {
+        if (s_SpawnMode) { Log("spawn menu: house design change ignored"); return true; }
         if (BridgeTabOpen() || MenuOnBridge()) { Log("bridges: house pick ignored (menu on a bridge or incline / extra tab)"); return true; }
         HouseExt e;
         if (!design || !HouseExtOf(HouseBodyOfHandle(handle), &e)) return false;
@@ -1544,7 +2214,8 @@ namespace sl {
     constexpr u32 HomeTabEntrySize   = 0x70;
     constexpr u32 BridgeTabKind      = 0x7f;        /* not one of the game's kinds (0x2a-0x2f) */
     constexpr u32 InclineTabKind     = 0x7e;
-    constexpr int BridgeTab          = 5, InclineTab = 6, HomeTabCount = 7;
+    constexpr u32 BuildingsTabKind   = 0x7d;
+    constexpr int BridgeTab          = 5, InclineTab = 6, BuildingsTab = 7, HomeTabCount = 8;
     constexpr u32 MenuTabIndex       = 0x1c290;
     constexpr u32 TabBtnKind         = 0x270, TabBtnAnim = 600;
     constexpr u32 AnimFrameQueryGot  = 0x4ac4f00;   /* vtable base of the anim query object */
@@ -1566,7 +2237,8 @@ namespace sl {
         if (!g || g->count != 5 || !g->entries) return gameDesc;
         memcpy(s_HomeTabs, g->entries, 5 * HomeTabEntrySize);
         static const struct { int tab; u32 kind; const char* label; } extra[] = {
-            { BridgeTab, BridgeTabKind, "1290" }, { InclineTab, InclineTabKind, "1291" } };   /* bridges_tab.py */
+            { BridgeTab, BridgeTabKind, "1290" }, { InclineTab, InclineTabKind, "1291" },
+            { BuildingsTab, BuildingsTabKind, "1292" } };   /* bridges_tab.py */
         for (const auto& x : extra) {
             u8* e = s_HomeTabs + x.tab * HomeTabEntrySize;
             memcpy(e, g->entries + 1 * HomeTabEntrySize, HomeTabEntrySize);
@@ -1594,7 +2266,7 @@ namespace sl {
     /* After 0x3033694 put frame 0 on an unknown kind: the bridge kind gets Pattern frame 5
        (same calls as the end of 0x3033694). */
     void HomeTabIcon(u8* btn, u32 kind) {
-        int tab = kind == BridgeTabKind ? BridgeTab : kind == InclineTabKind ? InclineTab : -1;
+        int tab = kind == BridgeTabKind ? BridgeTab : kind == InclineTabKind ? InclineTab : kind == BuildingsTabKind ? BuildingsTab : -1;
         if (tab < 0 || !btn) return;
         u8* anim = *reinterpret_cast<u8**>(btn + TabBtnAnim);
         if (!anim || !*reinterpret_cast<u8**>(anim + 8)) return;
@@ -1671,6 +2343,7 @@ namespace sl {
         s32 tab = *reinterpret_cast<s32*>(menu + MenuTabIndex);
         if (tab == BridgeTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BridgeCells;
         if (tab == InclineTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = InclineCells;
+        if (tab == BuildingsTab) *reinterpret_cast<u32*>(menu + MenuGridCount) = BuildingCells;
         /* current look (the pink card with the tick) and the cursor's start: the grid reads the
            current item of the tab clamped to 0-4 (tab 0, +0x1c1f4), so on the extra tabs tab 0's
            slot holds ours, and gets its own value back on the game's tabs */
@@ -1706,20 +2379,25 @@ namespace sl {
        roof tab with a list of made-up ids 60000+ (bridges) / 60010+ (inclines), whose names
        bridges_tab.py adds to STR_HouseRoofName (the game's bridge / incline kit names). */
     constexpr u32 CellNameOff  = 0x1c4e0;
-    static const u16 k_BridgeNameIds[8]  = { 60000, 60001, 60002, 60003, 60004, 60005, 60006, 60007 };
-    static const u16 k_InclineNameIds[8] = { 60010, 60011, 60012, 60013, 60014, 60015, 60016, 60017 };
+    /* With the spaces left (sai): bridges_tab.py adds each name once per count 0..47, as
+       61000 / 62000 / 63000 (bridges / inclines / buildings) + cell * 50 + spaces left. */
+    int SpawnSpacesLeft();
+    static u16 s_CellNameIds[16];
 
     void HomeCellName(u8* menu, void* ev, void (*orig)(u8*, void*)) {
         u32& tab = *reinterpret_cast<u32*>(menu + MenuTabIndex);
-        if (!EditorMap() || (tab != (u32)BridgeTab && tab != (u32)InclineTab)) { orig(menu, ev); return; }
+        if (!EditorMap() || (tab != (u32)BridgeTab && tab != (u32)InclineTab && tab != (u32)BuildingsTab)) { orig(menu, ev); return; }
         u32 savedTab = tab;
         u32& count = *reinterpret_cast<u32*>(menu + CellNameOff);
         const u16*& ids = *reinterpret_cast<const u16**>(menu + CellNameOff + 8);
         u32 savedCount = count;
         const u16* savedIds = ids;
         tab = 1;
-        count = 8;
-        ids = savedTab == (u32)BridgeTab ? k_BridgeNameIds : k_InclineNameIds;
+        count = savedTab == (u32)BuildingsTab ? (u32)BuildingCells : 8;
+        int left = SpawnSpacesLeft();
+        u32 base = savedTab == (u32)BridgeTab ? 61000 : savedTab == (u32)InclineTab ? 62000 : 63000;
+        for (u32 i = 0; i < count && i < 16; i++) s_CellNameIds[i] = (u16)(base + i * 50 + (u32)left);
+        ids = s_CellNameIds;
         orig(menu, ev);
         tab = savedTab;
         count = savedCount;
@@ -1739,7 +2417,7 @@ namespace sl {
             for (s32 k = 0; k < 0x10e; k++) {
                 u8* sl = menu + 0x2a0 + k * 0x1a8;
                 if (*reinterpret_cast<s32*>(sl + 0x1a0) != 0 || ((sl[0x18] >> 1) & 1)) continue;
-                char name[4] = { tab == BridgeTab ? 'B' : 'S', (char)('0' + idx % 10), 0, 0 };
+                char name[4] = { tab == BridgeTab ? 'B' : tab == InclineTab ? 'S' : 'H', (char)('0' + idx % 10), 0, 0 };
                 struct { uintptr_t vt; const char* str; } nm = { *reinterpret_cast<uintptr_t*>(Main(SafeStringVtGot)) + 0x10, name };
                 reinterpret_cast<void (*)(u8*, void*, void*, u32)>(Main(IconLoad))(sl, &nm, *reinterpret_cast<void**>(Main(NoneItemGot)), IconKindShape);
                 slot = k;
@@ -1803,6 +2481,28 @@ namespace sl {
 
     static void LogRecord(const char* what, const u8* r);
 
+    /* TEST (spawn stage 2a): the facts needed to write a new record - the cursor, every building
+       record, and where each bridge / incline / house body really stands. Read-only. */
+    [[maybe_unused]] static void SpawnDump() {
+        if (LiveLayout(s_EditLayout)) {
+            const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+            Log("spawn dump: cursor %d %d %d", (int)c->x, (int)c->y, (int)c->z);
+        }
+        u8* recs = BuildingRecords();
+        if (recs) for (int i = 0; i < 47; i++) {
+            char tag[16];
+            snprintf(tag, sizeof(tag), "rec %02d", i);
+            LogRecord(tag, recs + i * 0x14);
+        }
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            u32 idx = *reinterpret_cast<u32*>(a + ActorRecordIndex);
+            u32 rot = *reinterpret_cast<u32*>(*reinterpret_cast<u8**>(a + ActorTransform) + 0x2b4);
+            Log("spawn dump: body rec %d kind %d at %d %d %d rot %x", (int)idx, StructureOfBody(a), (int)p->x, (int)p->y, (int)p->z, rot);
+        });
+    }
+
     /* Building body of a bridge or incline: its record (body +0x174) has type 26 / 27. */
     static int StructureOfBody(u8* body) {
         u8* recs = BuildingRecords();
@@ -1812,17 +2512,46 @@ namespace sl {
         return t == BridgeBuildingType || t == InclineBuildingType ? t : 0;
     }
 
+    /* Buildings tab (tab 7): shops / services the spawn menu can place. Tested by writing copies into
+       a save (2026-11-26, real Switch): a copy loads and is saved, its door leads into the original
+       (you come out of the original). Built at grass level: on the beach they float, so the tab only
+       places on flat ground at 0 or above. Order = the tab's cells (building_icons.py). */
+    /* (k_BuildingCells: see the forward declarations near RemovableBuildingOfBody's) */
+
+    /* A copy is any record of one of those types with an earlier record of the same type: Y may
+       remove it. The first one (the island's own) never. */
+    static int RemovableBuildingOfBody(u8* body) {
+        u8* recs = BuildingRecords();
+        if (!recs || !body) return 0;
+        u32 i = *reinterpret_cast<u32*>(body + ActorRecordIndex);
+        if (i >= 47) return 0;
+        s16 t = *reinterpret_cast<s16*>(recs + i * 0x14);
+        if (t <= 0 || t == BridgeBuildingType || t == InclineBuildingType) return 0;
+        /* sai: any building may go, except the ones holding story / save data: player houses (1-8),
+           Resident Services (20) and the Airport (22) - but a spawned copy of those may */
+        bool keep = (t >= 1 && t <= 8) || t == 20 || t == 22;
+        if (!keep) return t;
+        for (u32 k = 0; k < i; k++) if (*reinterpret_cast<s16*>(recs + k * 0x14) == t) return t;
+        return 0;
+    }
+
     static int s_MenuBridge = -1;   /* record of the bridge / incline the house menu was opened on, or -1 */
     static int s_MenuKind = 0;      /* its record type (26 / 27) */
     bool ApplyInclinePick(int rec, int which);
     bool ApplyBridgePick(int rec, int material);
+    bool SpawnStructure(int tab, int cell);
 
     /* 0x2a914b0 for a bridge: the menu was opened on a bridge. The design stays "none" (0xffff),
        the menu then starts on the Bridges tab (HomeTabStart). */
     bool BridgeDesignGet(u32 handle) {
         u8* a = ActorOfHandle(handle);
-        for (int i = 0; i < MaxHandleRemaps && !a && handle; i++)
-            if (s_RemapFrom[i] == handle) a = ActorOfHandle(s_RemapTo[i]);
+        for (int n = 0; n < MaxHandleRemaps && !a && handle; n++) {   /* swapped bridge (maybe more than once) */
+            u32 to = 0;
+            for (int i = 0; i < MaxHandleRemaps; i++) if (s_RemapFrom[i] == handle) to = s_RemapTo[i];
+            if (!to) break;
+            handle = to;
+            a = ActorOfHandle(handle);
+        }
         if (!a || VtOf(a) != BuildingBodyVt || !IsBridgeBody(a)) { s_MenuBridge = -1; return false; }
         s_MenuBridge = (int)*reinterpret_cast<u32*>(a + ActorRecordIndex);
         s_MenuKind = StructureOfBody(a);
@@ -1835,6 +2564,7 @@ namespace sl {
 
     /* 0x3036ca0(strip, owner, first tab): a menu opened on a bridge starts on the Bridges tab. */
     u32 HomeTabStart(u8* strip, u32 first) {
+        if (s_SpawnMode && strip && strip == s_HomeStrip) { Log("spawn menu: starts on the Bridges tab"); return (u32)BridgeTab; }
         if (!MenuOnBridge() || !strip || strip != s_HomeStrip) return first;
         int tab = s_MenuKind == InclineBuildingType ? InclineTab : BridgeTab;
         Log("bridges: menu opens on tab %d", tab);
@@ -1842,19 +2572,37 @@ namespace sl {
     }
 
     /* 0x340c1d0(menu, event): A on a grid cell. On the Bridges tab: which cell (the game's own
-       index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on. */
-    bool HomeGridPick(u8* menu, u8* event) {
+       index math, list = menu->+0x220->+0x578), then swap the bridge the menu was opened on.
+       The game's own handler still runs afterwards (v0.64): skipping it left the grid without
+       its hand cursor and the menu stuck until it was closed and opened again. The house pick
+       it makes is ignored (HouseDesignSet), and the grid is refilled on the next frame
+       (s_RefillMenu) so the tick moves to the new look outside the press handler. */
+    static u8* s_RefillMenu = nullptr;
+    struct PendingSpawn { s32 tab; s32 cell; s64 at; bool on; };
+    static PendingSpawn s_PendingSpawn = {};
+    /* BridgeTick: the picked structure is placed when the editor is back in cursor mode (menu closed),
+       or after 8 s whatever happens. */
+    static void PendingSpawnTick() {
+        if (!s_PendingSpawn.on) return;
+        s64 now = NowTick();
+        bool cursor = s_CursorQueryTick && now - s_CursorQueryTick < MsTicks(100) && now - s_PendingSpawn.at > MsTicks(150);
+        if (!cursor && now - s_PendingSpawn.at < MsTicks(8000)) return;
+        s_PendingSpawn.on = false;
+        SpawnStructure(s_PendingSpawn.tab, s_PendingSpawn.cell);
+    }
+
+    void HomeGridPick(u8* menu, u8* event) {
         s32 tab = menu ? *reinterpret_cast<s32*>(menu + MenuTabIndex) : -1;
-        if (!menu || !event || !EditorMap() || tab < BridgeTab) return false;
+        if (!menu || !event || !EditorMap() || tab < BridgeTab) return;
         u8* owner = *reinterpret_cast<u8**>(menu + 0x220);
         u8* list = owner ? *reinterpret_cast<u8**>(owner + 0x578) : nullptr;
-        if (!list) return true;
+        if (!list) return;
         void* cell = *reinterpret_cast<void**>(event + 8);
         s32 n = *reinterpret_cast<s32*>(list + 0x208);
         void** cells = *reinterpret_cast<void***>(list + 0x210);
         s32 slot = -1;
         for (s32 i = 0; i < n && cells; i++) if (cells[i] == cell) { slot = i; break; }
-        if (slot < 0) return true;
+        if (slot < 0) return;
         s32 cols = *reinterpret_cast<s32*>(list + 0x2e8);
         s32 top = *reinterpret_cast<s32*>(list + 0x430) - *reinterpret_cast<s32*>(list + 0x438);
         s32 row = cols ? slot / cols : 0;
@@ -1873,12 +2621,22 @@ namespace sl {
         if (idx < 0 || idx >= *reinterpret_cast<s32*>(list + 0x3cc)) idx = -1;
         Log("bridges: cell %d picked (slot %d)", idx, slot);
         int want = tab == BridgeTab ? BridgeBuildingType : InclineBuildingType;
+        /* A spawn: the menu came from D-pad left. On a Switch the menu sometimes took longer to open
+           than the spawn timing allows ("did not open"), or the cursor heartbeat ended spawn mode
+           while it opened; then picks were ignored. So a pick within 10 s of D-pad left, in a menu
+           not opened on a bridge / incline, is a spawn too. */
+        bool spawnPick = s_SpawnMode || (!MenuOnBridge() && SpawnWithin(0, 10000));
+        if (spawnPick) {
+            Log("spawn menu: pick tab %d cell %d%s", tab, idx, s_SpawnMode ? "" : " (late menu)");
+            if (idx >= 0) SpawnStructure(tab, idx);   /* right away, while the menu is open (sai prefers it) */
+            return;
+        }
+        if (tab == BuildingsTab) { Log("buildings: open the menu with D-pad left to place one"); return; }
         if (idx >= 0 && MenuOnBridge() && s_MenuKind == want) {
             if (want == BridgeBuildingType) ApplyBridgePick(s_MenuBridge, idx);
             else ApplyInclinePick(s_MenuBridge, idx);
-            reinterpret_cast<void (*)(u8*)>(Main(0x340de50))(menu);   /* refill: the tick moves to the new look */
+            s_RefillMenu = menu;   /* next frame: the tick moves to the new look */
         } else if (idx >= 0) Log("bridges: point at a %s and press X to change it", want == BridgeBuildingType ? "bridge" : "incline");
-        return true;
     }
 
     static void LogRecord(const char* what, const u8* r) {
@@ -1954,6 +2712,9 @@ namespace sl {
             });
         Log("bridges: new bridge %x (vt %x, index %s), old %x", w.newH, vt, indexed ? "ok" : "differs", oldH);
         if (u8* ob = ActorOfHandle(oldH)) {
+            /* the open menu keeps the old bridge's handle: lead it to the new one */
+            s_RemapFrom[s_RemapNext] = oldH; s_RemapTo[s_RemapNext] = w.newH;
+            s_RemapNext = (s_RemapNext + 1) % MaxHandleRemaps;
             reinterpret_cast<DelFn>(Main(ActorRequestDelete))(ob);
             /* (its walkable shape is rebuilt once the island editor closes: RebuildShapes) */
         }
@@ -2025,6 +2786,7 @@ namespace sl {
        still has the old look's. It can't be rebuilt while the island editor runs (its play mode
        builds nothing: the bridge lost all collision), so it is done once the editor has closed. */
     static u64 s_ShapePending = 0;
+    static u64 s_RemovePending = 0;   /* of those: removed records (Y in the editor) - only clear the shape */
     static int s_ShapeWait = 0;
 
     /* Rebuild a swapped bridge / incline's slot the way the game does at island load (the type
@@ -2053,7 +2815,20 @@ namespace sl {
             if (!(s_ShapePending >> i & 1)) continue;
             s16 type = *reinterpret_cast<s16*>(recs + i * 0x14);
             u16 id = *reinterpret_cast<u16*>(recs + i * 0x14 + BridgeIdOffset);
-            if (type != BridgeBuildingType && type != InclineBuildingType) continue;
+            if (type != BridgeBuildingType && type != InclineBuildingType) {
+                if (type == 0 && (s_RemovePending >> i & 1)) {
+                    reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
+                    Log("spawn: walk shape of removed record %d cleared", i);
+                } else if (type > 0) {
+                    /* a house / shop placed from the Buildings tab: walls (the house builder) - it was
+                       walk-through until the island was reloaded */
+                    reinterpret_cast<RemoveFn>(Main(BldSlotRemove))(field + BldSlotOffset, (u32)i, h);
+                    u64 ret = reinterpret_cast<u64 (*)(u8*, u32, u64, u64, u64, u64, u64, u64)>(Main(BldSlotCreate))(
+                        field + BldSlotOffset, (u32)i, h, 0, 0, 0, 0, 0);
+                    Log("buildings: walls of record %d (type %d) built (ret %d)", i, type, (int)(ret & 1));
+                }
+                continue;
+            }
             u8* slot = field + 0x26f8 + 8 + i * 0x208;
             const char* oldName = type == BridgeBuildingType ? reinterpret_cast<const char*>(slot + 0x114)
                                                              : *reinterpret_cast<const char**>(slot + 0x1b0);
@@ -2066,8 +2841,10 @@ namespace sl {
                 *reinterpret_cast<u8**>(slot + 8), newName ? newName : "?");
         }
         s_ShapePending = 0;
+        s_RemovePending = 0;
         s_ShapeWait = 0;
         s_EditorClosed = false;
+        SyncSaveCopies();
     }
 
     static void RememberOverride(int idx, u16 oldId, u16 newId) {
@@ -2113,12 +2890,534 @@ namespace sl {
         return -1;
     }
 
+    /* ---- Spawn menu, stage 2: a pick creates a new bridge / incline at the cursor ----
+       Building records (save view and the land list, 47 x 0x14 bytes, little endian): +0 u16 type
+       (0 = empty slot, 26 bridge, 27 incline), +2 u16 X and +4 u16 Z in 5-unit steps (for bridges
+       and inclines X*5, Z*5 is exactly where the actor stands), +6 rotation in quarter turns, +8 u16
+       look id. The new record goes into the first empty slot, the building spawner builds it now and
+       its walkable shape is built once the editor has closed (s_ShapePending). Closing the editor
+       restores its opening snapshot, which empties the slot again: KeepNew writes it back. */
+    struct NewStructure { int idx; u8 raw[0x14]; };
+    static NewStructure s_New[16];
+    static int s_NewCount = 0;
+
+    static u32 SpawnRecordActor(int idx) {
+        u8* field = *reinterpret_cast<u8**>(Main(FieldMgrGlobal));
+        u8* land = *reinterpret_cast<u8**>(Main(LandGlobal));
+        u8* island = land ? *reinterpret_cast<u8**>(land + 0x38) : nullptr;
+        u8* list = island ? *reinterpret_cast<u8**>(island + 0x148 + 8) : nullptr;
+        if (!field || !list) { Log("spawn: no building list"); return 0; }
+        BuildingRecord record = reinterpret_cast<BuildingRecord (*)(u8*, u32)>(Main(BuildingRecordGet))(list, (u32)idx);
+        LogRecord("spawn: list record", record.raw);
+        u32 h = reinterpret_cast<u32 (*)(u8*, u8*, u32, u64, u64, u64, u64, u64)>(Main(BuildingSpawn))(field + BuildingSpawner, record.raw, (u32)idx, 0, 0, 0, 0, 0);
+        Log("spawn: record %d spawn requested, handle %x", idx, h);
+        return h;
+    }
+
+    static void WriteRecord(int idx, const u8* raw) {
+        u8* recs = BuildingRecords();
+        if (recs) memcpy(recs + idx * 0x14, raw, 0x14);
+        u8* e = LandBuildingEntry((u32)idx);
+        if (e && (!recs || e != recs + idx * 0x14)) memcpy(e, raw, 0x14);
+        SyncSaveCopies();
+    }
+
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at);
+    /* Free records for a spawn (all 47 building records; at most 16 spawns kept at once). */
+    int SpawnSpacesLeft() {
+        u8* recs = BuildingRecords();
+        if (!recs) return 0;
+        int n = 0;
+        for (int i = 0; i < 47; i++) {
+            const u8* r = recs + i * 0x14;
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (empty) n++;
+        }
+        int cap = 16 - s_NewCount;
+        if (n > cap) n = cap;
+        return n < 0 ? 0 : n > 47 ? 47 : n;
+    }
+
+    bool SpawnStructure(int tab, int cell) {
+        u8* recs = BuildingRecords();
+        if (!recs || !LiveLayout(s_EditLayout) || cell < 0) return false;
+        s16 type;
+        u16 id;
+        if (tab == BridgeTab) {
+            if (cell >= BridgeMaterials) return false;
+            type = BridgeBuildingType; id = k_BridgeIds[cell][0];
+        } else if (tab == InclineTab) {
+            if (cell >= (int)(sizeof(k_InclineIds) / 2)) return false;
+            type = InclineBuildingType; id = k_InclineIds[cell];
+        } else if (tab == BuildingsTab) {
+            if (cell >= BuildingCells) return false;
+            type = k_BuildingCells[cell]; id = 0;
+        } else return false;
+        int slot = -1;
+        for (int i = 0; i < 47 && slot < 0; i++) {
+            const u8* r = recs + i * 0x14;
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (empty) slot = i;
+        }
+        if (slot < 0 || s_NewCount >= 16) { Log("spawn: no free building slot"); return false; }
+        const Vec3f* c = reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        u8 raw[0x14] = {};
+        *reinterpret_cast<u16*>(raw + 0) = (u16)type;
+        *reinterpret_cast<u16*>(raw + 2) = (u16)(int)(c->x / 5.0f + 0.5f);
+        *reinterpret_cast<u16*>(raw + 4) = (u16)(int)(c->z / 5.0f + 0.5f);
+        *reinterpret_cast<u16*>(raw + 6) = 0;
+        *reinterpret_cast<u16*>(raw + 8) = id;
+        WriteRecord(slot, raw);
+        s_New[s_NewCount].idx = slot;
+        memcpy(s_New[s_NewCount].raw, raw, 0x14);
+        s_NewCount++;
+        Log("spawn: %s id %x in record %d at %d %d", type == BridgeBuildingType ? "bridge" : type == InclineBuildingType ? "incline" : "building", id, slot,
+            *reinterpret_cast<u16*>(raw + 2) * 5, *reinterpret_cast<u16*>(raw + 4) * 5);
+        SpawnRecordActor(slot);
+        s_ShapePending |= 1ull << slot;
+        PlayEditFx("道造成煙：四角", "道造成煙：四角", *c);   /* the path tool's puff, with its own sound */
+        return true;
+    }
+
+    /* The editor's closing restore empties new records again: put them back and rebuild them. */
+    static void KeepNew() {
+        u8* recs = BuildingRecords();
+        if (!recs) return;
+        for (int i = 0; i < s_NewCount; i++) {
+            u8* r = recs + s_New[i].idx * 0x14;
+            if (memcmp(r, s_New[i].raw, 0x14) == 0) continue;
+            /* The game fills in more of the record once the building is spawned: still ours when the
+               type, position and look are the ones we wrote - keep the game's version from now on. */
+            const u16* now = reinterpret_cast<const u16*>(r);
+            const u16* mine = reinterpret_cast<const u16*>(s_New[i].raw);
+            if (now[0] == mine[0] && now[4] == mine[4]) {   /* same type and look: still ours */
+                if (now[1] != mine[1] || now[2] != mine[2] || now[3] != mine[3]) {
+                    LogRecord("spawn: record changed by the game, was", s_New[i].raw);
+                    LogRecord("spawn: record changed by the game, now", r);
+                }
+                memcpy(s_New[i].raw, r, 0x14);
+                continue;
+            }
+            bool empty = true;
+            for (int k = 0; k < 0x14; k++) if (r[k]) { empty = false; break; }
+            if (!empty) {   /* something else is there now */
+                LogRecord("spawn: forgotten, mine", s_New[i].raw);
+                LogRecord("spawn: forgotten, now ", r);
+                Log("spawn: record %d taken by something else - forgotten", s_New[i].idx);
+                s_New[i--] = s_New[--s_NewCount];
+                continue;
+            }
+            WriteRecord(s_New[i].idx, s_New[i].raw);
+            Log("spawn: record %d was emptied - written back", s_New[i].idx);
+            SpawnRecordActor(s_New[i].idx);
+            s_ShapePending |= 1ull << s_New[i].idx;
+        }
+    }
+
+    /* ZL / ZR on a bridge / incline you spawned: a quarter turn (record +6) or the next size (bridges:
+       3 / 4 / 5 long, then the diagonal 2.5 / 3.0 / 3.5 of the same material). The record is
+       rewritten, the old actor deleted and the structure spawned again; the keeper follows. Only
+       spawned ones (in s_New), whose record the keeper protects from the editor's closing restore. */
+    static void DeleteActorsOfRecord(int idx);
+    struct ReshapeSwap { bool active; u32 old[4]; int n; u32 newH; int frames; };
+    static ReshapeSwap s_Reshape = {};
+    static void FinishReshape() {
+        if (!s_Reshape.active) return;
+        using DelFn = void (*)(u8*);
+        for (int i = 0; i < s_Reshape.n; i++)
+            if (u8* a = ActorOfHandle(s_Reshape.old[i])) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+        s_Reshape.active = false;
+    }
+    static void ReshapeTick() {
+        if (!s_Reshape.active) return;
+        s_Reshape.frames++;
+        /* 2 frames: the new one is drawn by then. Waiting for its actor by handle didn't work (the
+           lookup stayed empty), so both showed stacked for ~2 s (Switch video). */
+        if (s_Reshape.frames >= 2) FinishReshape();
+    }
+    /* A turn like furniture: the actor can't be turned while standing (its turn is set when it's built),
+       so the old one dips (smaller, lower) for the frames before it's deleted and the new one pops up
+       from that with a little overshoot. Scale (body +0x818) and height are read every frame. */
+    struct TurnPop { bool active; int idx; u32 old[4]; int n; int f; float y; u32 h; };
+    static TurnPop s_Pop = {};
+    static const float k_PopS[] = { 0.82f, 0.88f, 0.95f, 1.02f, 1.07f, 1.08f, 1.05f, 1.01f, 0.99f, 1.0f };
+    static const float k_PopY[] = { -1.5f, -0.8f, 0.2f, 1.2f, 1.8f, 1.6f, 1.0f, 0.4f, 0.0f, 0.0f };
+    static void SetLook(u8* a, float sc, float y) {
+        *reinterpret_cast<Vec3f*>(a + 0x818) = { sc, sc, sc };
+        reinterpret_cast<Vec3f*>(a + 0x7f0)->y = y;
+        reinterpret_cast<Vec3f*>(a + 0x7fc)->y = y;
+    }
+    void TurnPopTick() {
+        if (!s_Pop.active) return;
+        u8* nb = s_Pop.h ? ActorOfHandle(s_Pop.h) : nullptr;
+        if (!nb && s_Pop.f == 0) {
+            ForEachActor([&](u8* a) {
+                if (nb || VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)s_Pop.idx) return;
+                u32 h = *reinterpret_cast<u32*>(a + 0x230);
+                for (int i = 0; i < s_Pop.n; i++) if (s_Pop.old[i] == h) return;
+                nb = a;
+            });
+            if (!nb) return;
+            s_Pop.h = *reinterpret_cast<u32*>(nb + 0x230);
+            s_Pop.y = reinterpret_cast<Vec3f*>(nb + 0x7f0)->y;
+        }
+        if (!nb || s_Pop.f >= (int)(sizeof(k_PopS) / sizeof(k_PopS[0]))) { s_Pop.active = false; return; }
+        SetLook(nb, k_PopS[s_Pop.f], s_Pop.y + k_PopY[s_Pop.f]);
+        s_Pop.f++;
+    }
+
+    bool ReshapeStructure(u8* body, bool rotate, bool resize) {
+        u8* recs = BuildingRecords();
+        int type = StructureOfBody(body);
+        u32 idx = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        if (!recs || !type || idx >= 47) return false;
+        int n = -1;
+        for (int i = 0; i < s_NewCount; i++) if (s_New[i].idx == (int)idx) n = i;
+        if (n < 0) { Log("structures: record %d is not one you spawned - not turned / resized", (int)idx); return false; }
+        u8 raw[0x14];
+        memcpy(raw, recs + idx * 0x14, 0x14);
+        u16* r = reinterpret_cast<u16*>(raw);
+        if (rotate) r[3] = (u16)((r[3] + 1) & 3);
+        if (resize) {
+            int m, k;
+            if (type != BridgeBuildingType || !BridgeLook(r[4], &m, &k)) { Log("structures: record %d has no other sizes", (int)idx); return false; }
+            r[4] = k_BridgeIds[m][(k + 1) % BridgeShapes];
+        }
+        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        /* The new look is spawned first and the old actor deleted once the new one is there (a few
+           frames later, ReshapeTick): deleting first made the structure blink and its outline / the
+           Y prompt flicker (seen in a Switch video). */
+        FinishReshape();   /* a swap still running (fast presses): finish it now */
+        s_Reshape.n = 0;
+        ForEachActor([&](u8* a) {
+            if (s_Reshape.n < 4 && VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == idx && StructureOfBody(a))
+                s_Reshape.old[s_Reshape.n++] = *reinterpret_cast<u32*>(a + 0x230);
+        });
+        if (rotate) {
+            if (s_Pop.active) if (u8* a = s_Pop.h ? ActorOfHandle(s_Pop.h) : nullptr) SetLook(a, 1.0f, s_Pop.y);
+            s_Pop = {};
+            s_Pop.active = true; s_Pop.idx = (int)idx; s_Pop.n = s_Reshape.n;
+            for (int i = 0; i < s_Reshape.n; i++) {
+                s_Pop.old[i] = s_Reshape.old[i];
+                if (u8* a = ActorOfHandle(s_Reshape.old[i])) SetLook(a, 0.85f, reinterpret_cast<Vec3f*>(a + 0x7f0)->y - 1.5f);
+            }
+        }
+        WriteRecord((int)idx, raw);
+        memcpy(s_New[n].raw, raw, 0x14);
+        s_Reshape.newH = SpawnRecordActor((int)idx);
+        s_Reshape.frames = 0;
+        s_Reshape.active = true;
+        s_ShapePending |= 1ull << idx;
+        Log("structures: record %d %s -> rotation %d id %x", (int)idx, rotate ? "turned" : "resized", r[3], r[4]);
+        if (rotate) PlayEditFx(nullptr, "90度回転させる", at);
+        else PlayEditFx("道造成煙：角丸", "橋坂外観変更", at);   /* (auditioned on a Switch, all approved) */
+        return true;
+    }
+
+    /* ---- Y removes a bridge / incline: its record is emptied, its actor deleted now, its walkable shape
+       cleared once the editor has closed. The editor's closing restore brings the record (and the actor)
+       back: KeepRemoved empties it again and deletes the actor of that record. ---- */
+    struct RemovedStructure { int idx; u8 raw[0x14]; };
+    static RemovedStructure s_Removed[16];
+    static int s_RemovedCount = 0;
+
+    static void DeleteActorsOfRecord(int idx) {
+        using DelFn = void (*)(u8*);
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) == BuildingBodyVt && *reinterpret_cast<u32*>(a + ActorRecordIndex) == (u32)idx && (StructureOfBody(a) || RemovableBuildingOfBody(a)))
+                reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+        });
+    }
+
+    /* Removal like furniture being put away: the actors shrink (scale at body +0x818, and sink a
+       little in case the scale is only read when built) for a few frames, then are deleted. */
+    struct Shrinking { u32 h; int f; float y; };
+    static Shrinking s_Shrink[8];
+    static int s_ShrinkCount = 0;
+    constexpr int ShrinkFrames = 6;   /* 12, then 8, were a bit slow (sai) */
+    static void ShrinkActorsOfRecord(int idx) {
+        using DelFn = void (*)(u8*);
+        ForEachActor([&](u8* a) {
+            if (VtOf(a) != BuildingBodyVt || *reinterpret_cast<u32*>(a + ActorRecordIndex) != (u32)idx) return;
+            if (s_ShrinkCount >= 8) { reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a); return; }
+            s_Shrink[s_ShrinkCount++] = { *reinterpret_cast<u32*>(a + 0x230), 0, reinterpret_cast<Vec3f*>(a + 0x7f0)->y };
+        });
+    }
+    void ShrinkTick() {
+        using DelFn = void (*)(u8*);
+        for (int i = 0; i < s_ShrinkCount; i++) {
+            Shrinking& k = s_Shrink[i];
+            u8* a = ActorOfHandle(k.h);
+            if (a && ++k.f < ShrinkFrames) {
+                float t = (float)k.f / ShrinkFrames;
+                float sc = 1.0f - t * t;             /* eases in, like the game's put-away */
+                if (sc < 0.02f) sc = 0.02f;
+                Vec3f* s3 = reinterpret_cast<Vec3f*>(a + 0x818);
+                *s3 = { sc, sc, sc };
+                float y = k.y - 4.0f * t * t;
+                reinterpret_cast<Vec3f*>(a + 0x7f0)->y = y;
+                reinterpret_cast<Vec3f*>(a + 0x7fc)->y = y;
+                continue;
+            }
+            if (a) reinterpret_cast<DelFn>(Main(ActorRequestDelete))(a);
+            s_Shrink[i--] = s_Shrink[--s_ShrinkCount];
+        }
+    }
+
+    bool RemoveStructure(u8* body) {
+        u8* recs = BuildingRecords();
+        int type = StructureOfBody(body);
+        if (!type) type = RemovableBuildingOfBody(body);
+        u32 idx = body ? *reinterpret_cast<u32*>(body + ActorRecordIndex) : 99;
+        if (!recs || !type || idx >= 47 || s_RemovedCount >= 16) return false;
+        RemovedStructure& r = s_Removed[s_RemovedCount++];
+        r.idx = (int)idx;
+        memcpy(r.raw, recs + idx * 0x14, 0x14);
+        for (int i = 0; i < s_NewCount; i++) if (s_New[i].idx == (int)idx) s_New[i--] = s_New[--s_NewCount];
+        for (int i = 0; i < s_OverrideCount; i++) if (s_Overrides[i].idx == (int)idx) s_Overrides[i--] = s_Overrides[--s_OverrideCount];
+        /* every actor of this record, not just the one under the cursor: a building that was just
+           moved still has its old actor for a moment, which stayed visible and needed more presses */
+        Vec3f at = *reinterpret_cast<const Vec3f*>(body + 0x7f0);
+        PlayEditFx("道造成消失煙", "道造成消失煙", at);   /* the path tool's vanishing smoke + its sound ("put away" was a faint click) */
+        ShrinkActorsOfRecord((int)idx);   /* (includes <body>; deleted once shrunk - deleting one twice isn't safe) */
+        u8 zero[0x14] = {};
+        WriteRecord((int)idx, zero);
+        s_ShapePending |= 1ull << idx;
+        s_RemovePending |= 1ull << idx;
+        Log("spawn: removed %s record %d (id %x)", type == BridgeBuildingType ? "bridge" : type == InclineBuildingType ? "incline" : "building", (int)idx,
+            *reinterpret_cast<u16*>(r.raw + 8));
+        return true;
+    }
+
+    static void KeepRemoved() {
+        u8* recs = BuildingRecords();
+        if (!recs) return;
+        for (int i = 0; i < s_RemovedCount; i++) {
+            const u16* now = reinterpret_cast<const u16*>(recs + s_Removed[i].idx * 0x14);
+            const u16* was = reinterpret_cast<const u16*>(s_Removed[i].raw);
+            if (now[0] == 0) continue;                                    /* still empty */
+            if (now[0] != was[0] || now[1] != was[1] || now[2] != was[2] || now[4] != was[4]) {
+                Log("spawn: removed record %d reused - forgotten", s_Removed[i].idx);
+                s_Removed[i--] = s_Removed[--s_RemovedCount];
+                continue;
+            }
+            u8 zero[0x14] = {};
+            WriteRecord(s_Removed[i].idx, zero);
+            DeleteActorsOfRecord(s_Removed[i].idx);
+            s_ShapePending |= 1ull << s_Removed[i].idx;
+            s_RemovePending |= 1ull << s_Removed[i].idx;
+            Log("spawn: removed record %d came back - emptied again", s_Removed[i].idx);
+        }
+    }
+
+    /* ---- XLink (effects ELink / sounds SLink) on the editor cursor ----
+       The editor cursor has an XLink user "FtrEditCursor" in both ELink2DB and SLink2DB (found by
+       reading the DBs: keywords such as 道造成消失煙 (path-building vanish smoke), 坂の撤去 (incline
+       removal), しまう (put away), 90度回転させる (rotate 90), 橋坂外観変更 (bridge/incline look change)).
+       The game emits one like 0x13ba1d8: asset = 0x3af5ec0(*(*(obj+0x30)+0x18), name); then
+       0x3af47b0(obj, {SafeString-ish vt (*(main+0x4acadf8)+0x10), asset, 0}, &handle). The cursor's
+       XLink objects: 0x13b9f78(area fx, owner) runs while editing; owner+8 is the ELink object it emits
+       the edit-area effect on. */
+    static u8* s_XOwner = nullptr;   /* captured from 0x13b9f78's second argument */
+    static u8* s_XArea = nullptr;
+    void CaptureEditXLink(u8* area, u8* owner) { s_XArea = area; s_XOwner = owner; }
+
+    static bool MemOk(uintptr_t a, size_t len, bool write);
+    static bool XLinkEmit(u8* obj, const char* name, const Vec3f* at = nullptr, float scale = 1.0f) {
+        if (!obj || !name) return false;
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        void* ctx = a30 ? *reinterpret_cast<void**>(a30 + 0x18) : nullptr;
+        if (!ctx) return false;
+        void* asset = reinterpret_cast<void* (*)(void*, const char*)>(Main(0x3af5ec0))(ctx, name);
+        if (!asset) return false;
+        struct { uintptr_t vt; void* asset; u8 flag; u8 pad[7]; } q = { *reinterpret_cast<uintptr_t*>(Main(0x4acadf8)) + 0x10, asset, 0, {} };
+        struct { u64 h; u32 x; u32 pad; } out = {};
+        reinterpret_cast<void (*)(u8*, void*, void*)>(Main(0x3af47b0))(obj, &q, &out);
+        /* An effect plays where it's told: like 0x13ba100 (the edit-area effect), the started event
+           (handle +0, checked by its id at +0x20 == handle +8) gets a position at +0xa8, scale 1 at
+           +0xb4, and flag 4 at +0x184 (use that transform). Without it nothing showed. */
+        u8* ev = reinterpret_cast<u8*>(out.h);
+        if (at && ev && MemOk(reinterpret_cast<uintptr_t>(ev), 0x188, true) && *reinterpret_cast<u32*>(ev + 0x20) == out.x) {
+            *reinterpret_cast<float*>(ev + 0xa8) = at->x;
+            *reinterpret_cast<float*>(ev + 0xac) = at->y;
+            *reinterpret_cast<float*>(ev + 0xb0) = at->z;
+            *reinterpret_cast<float*>(ev + 0xb4) = scale;
+            *reinterpret_cast<float*>(ev + 0xb8) = scale;
+            *reinterpret_cast<float*>(ev + 0xbc) = scale;
+            *reinterpret_cast<u32*>(ev + 0x184) |= 4;
+        }
+        return true;
+    }
+
+    /* Recording of XLink keyword searches and emits (dbg "xlog"), to find which XLink object plays
+       which keyword (the editor cursor's, for the effects / sounds above). */
+    struct XSearchRec { uintptr_t ctx; char name[48]; uintptr_t asset; };
+    /* The editor's own keyword table (main+0x4a4c328, 37 names): only these are recorded, the rest of
+       the game searches ~150 keywords a second (footsteps, ripples...). */
+    constexpr u32 EditKeywordTable = 0x4a4c328;
+    constexpr int EditKeywordCount = 37;
+    static bool IsEditKeyword(const char* name) {
+        const char* const* t = reinterpret_cast<const char* const*>(Main(EditKeywordTable));
+        for (int i = 0; i < EditKeywordCount; i++) if (t[i] && strcmp(t[i], name) == 0) return true;
+        return false;
+    }
+    struct XEmitRec { uintptr_t obj, ctx, asset; };
+    static XSearchRec s_XSearch[256];
+    static XEmitRec s_XEmit[256];
+    static std::atomic<u32> s_XSearchN{0}, s_XEmitN{0};
+    static std::atomic<int> s_XRecord{0};
+    static uintptr_t XCtxOf(u8* obj) {
+        if (!obj) return 0;
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        return a30 ? *reinterpret_cast<uintptr_t*>(a30 + 0x18) : 0;
+    }
+    /* The editor cursor's XLink objects, noted whenever the game looks up one of the editor's own
+       keywords (hovering / grabbing something): the sound one (SLink) finds it, the effect one
+       (ELink) doesn't. An XLink object sits 0x100 after its lookup context (checked: obj+0x30 ->
+       +0x18 is the context again). */
+    static uintptr_t s_EditSCtx = 0, s_EditECtx = 0;
+    static u8* XObjOfCtx(uintptr_t ctx) {
+        if (!ctx || !MemOk(ctx + 0x100, 0x38, false)) return nullptr;
+        u8* obj = reinterpret_cast<u8*>(ctx + 0x100);
+        u8* a30 = *reinterpret_cast<u8**>(obj + 0x30);
+        if (!a30 || !MemOk(reinterpret_cast<uintptr_t>(a30), 0x20, false)) return nullptr;
+        return XCtxOf(obj) == ctx ? obj : nullptr;
+    }
+    void XRecSearch(void* ctx, const char* name, void* asset) {
+        if (!name) return;
+        bool edit = EditorMap() && LiveLayout(s_EditLayout) && (u8)name[0] >= 0x80 && IsEditKeyword(name);
+        /* the first ones of an editor session are kept while they're alive: later lookups of these
+           keywords also come from other objects (a hovered bridge), and sounds sent to those went
+           nowhere once the bridge was rebuilt or removed (Switch: no turn / resize / remove sounds) */
+        if (edit) {
+            static u8* s_CtxLayout = nullptr;   /* a new editor session: capture again */
+            if (s_CtxLayout != s_EditLayout) { s_CtxLayout = s_EditLayout; s_EditSCtx = s_EditECtx = 0; }
+            if (asset) { if (!XObjOfCtx(s_EditSCtx)) s_EditSCtx = (uintptr_t)ctx; }
+            else if (!XObjOfCtx(s_EditECtx)) s_EditECtx = (uintptr_t)ctx;
+        }
+        if (!s_XRecord.load(std::memory_order_relaxed) || !edit) return;
+        u32 i = s_XSearchN.fetch_add(1) & 255;
+        s_XSearch[i].ctx = (uintptr_t)ctx;
+        s_XSearch[i].asset = (uintptr_t)asset;
+        strncpy(s_XSearch[i].name, name, sizeof(s_XSearch[i].name) - 1);
+        s_XSearch[i].name[sizeof(s_XSearch[i].name) - 1] = 0;
+    }
+    void XRecEmit(u8* obj, void* q) {
+        if (!s_XRecord.load(std::memory_order_relaxed) || !obj || !q) return;
+        uintptr_t asset = *reinterpret_cast<uintptr_t*>(reinterpret_cast<u8*>(q) + 8);
+        u32 ns = s_XSearchN.load();
+        bool ours = false;
+        for (u32 k = (ns > 256 ? ns - 256 : 0); k < ns && !ours; k++) if (s_XSearch[k & 255].asset == asset) ours = true;
+        if (!ours) return;
+        u32 i = s_XEmitN.fetch_add(1) & 255;
+        s_XEmit[i] = { (uintptr_t)obj, XCtxOf(obj), asset };
+    }
+
+    /* dbg "emit <obj> <keyword>": run on the game thread (BridgeTick). */
+    static std::atomic<int> s_EmitPending{0};
+    static uintptr_t s_EmitObj = 0;
+    static char s_EmitName[96];
+    static void RunPendingEmit() {
+        if (!s_EmitPending.load(std::memory_order_acquire)) return;
+        s_XRecord.store(0);   /* (our own emit isn't recorded) */
+        Vec3f at = {};
+        if (LiveLayout(s_EditLayout)) at = *reinterpret_cast<const Vec3f*>(s_EditLayout + LayoutCursor);
+        bool ok = XLinkEmit(reinterpret_cast<u8*>(s_EmitObj), s_EmitName, &at);
+        Log("xlink: emit '%s' on %lx -> %s", s_EmitName, (unsigned long)s_EmitObj, ok ? "found + emitted" : "keyword not found");
+        s_EmitPending.store(0, std::memory_order_release);
+    }
+
+    /* The editor's own effects / sounds for our actions (names from the FtrEditCursor users, auditioned
+       on a Switch: the sound plays; effects need a position). */
+    /* Effects 2.5x the path tool's size (sai: "make the clouds bigger"). Sounds get no position:
+       the effect event's layout (+0xa8 position...) isn't a sound event's, and with it most sounds
+       didn't play (sai: "barely no sounds"); the dbg test without a position played fine. */
+    /* Played from BridgeTick (the game's frame): turn / remove run in the controller hook, and sounds
+       started there never played (Switch: silent turns), while the same sounds sent through dbg
+       (played in BridgeTick) did. */
+    struct FxReq { const char* effect; const char* sound; Vec3f at; };
+    static FxReq s_FxQueue[8];
+    static int s_FxCount = 0;
+    static void PlayEditFx(const char* effect, const char* sound, const Vec3f& at) {
+        if (s_FxCount < 8) s_FxQueue[s_FxCount++] = { effect, sound, at };
+    }
+    static void RunEditFx() {
+        for (int i = 0; i < s_FxCount; i++) {
+            const FxReq& r = s_FxQueue[i];
+            /* 8 up: at the structure's middle the smoke looked like it came from underneath it */
+            Vec3f up = { r.at.x, r.at.y + 8.0f, r.at.z };
+            if (r.effect) { if (u8* e = XObjOfCtx(s_EditECtx)) XLinkEmit(e, r.effect, &up, 2.5f); }
+            if (r.sound) {
+                u8* so = XObjOfCtx(s_EditSCtx);
+                if (so) XLinkEmit(so, r.sound);
+                else Log("xlink: no sound player yet (hover something in the editor once)");
+            }
+        }
+        s_FxCount = 0;
+    }
+
+    /* Houses and shops: the game builds them at the cliff level's height, so on the beach (lower) they
+       hung in the air (seen on a Switch). Every 20 frames each building on the main island whose middle
+       isn't on the ground is moved there (body and its parts, like a grab; within 20, so a building
+       half over a cliff edge is left alone). Bridges / inclines and a held building are skipped. */
+    static void SnapBuildingsToGround() {
+        static int s_Tick = 0;
+        if (++s_Tick < 20) return;
+        s_Tick = 0;
+        if (!EditorMapStage()) return;
+        struct Snap { u8* body; float x, z, dy; };
+        Snap snaps[48];
+        int n = 0;
+        using HeightFn = float (*)(float, float*, u32*, u64);
+        ForEachActor([&](u8* a) {
+            if (n >= 48 || VtOf(a) != BuildingBodyVt || StructureOfBody(a)) return;
+            BldComp* c = CompOf(a);
+            if (c && c->grabbed) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + 0x7f0);
+            float pt[3] = { p->x, 0.0f, p->z };
+            float g = reinterpret_cast<HeightFn>(exl::util::modules::GetTargetOffset(GroundHeight))(0.0f, pt, nullptr, 0);
+            float dy = g - p->y;
+            /* only down (the beach): moving up lifted a house a little above the ground where the
+               ground under its middle is uneven (sai's house) */
+            if (dy > -0.3f || dy < -20.0f) return;
+            snaps[n++] = { a, p->x, p->z, dy };
+        });
+        if (!n) return;
+        ForEachActor([&](u8* a) {
+            u32 pair = PartPair(a);
+            if (!pair) return;
+            const Vec3f* p = reinterpret_cast<const Vec3f*>(a + (VtOf(a) == SignVt ? 0x160 : pair));
+            for (int i = 0; i < n; i++) {
+                float dx = p->x - snaps[i].x, dz = p->z - snaps[i].z;
+                if (dx < -8 || dx > 8 || dz < -8 || dz > 8) continue;
+                for (u32 off : { pair, pair + 0xcu }) reinterpret_cast<Vec3f*>(a + off)->y += snaps[i].dy;
+                break;
+            }
+        });
+        static int s_Logged = 0;
+        if (s_Logged < 10) { s_Logged++; Log("buildings: %d moved to the ground (first by %d)", n, (int)snaps[0].dy); }
+    }
+
     /* Game thread, every frame. */
     void BridgeTick() {
+        RunPendingEmit();
+        RunEditFx();
+        ReshapeTick();
+        PendingSpawnTick();
+        SnapBuildingsToGround();
+        KeepRemoved();
+        KeepNew();
         KeepOverrides();
         RebuildShapes();
         if (s_BridgeSwap.frames >= 0 && ++s_BridgeSwap.frames >= 4) FinishBridgeSwap();
         if (s_HomeMenu && !EditorMap()) s_HomeMenu = nullptr;
+        if (u8* m = s_RefillMenu) {
+            s_RefillMenu = nullptr;
+            if (m == s_HomeMenu && EditorMap() && *reinterpret_cast<s32*>(m + MenuTabIndex) >= BridgeTab)
+                reinterpret_cast<void (*)(u8*)>(Main(0x340de50))(m);
+        }
     }
 
     /* 0x13ba988 (edit object of a handle) for our buildings: handle +8 type, +0x10 actor handle. */
@@ -2292,6 +3591,8 @@ namespace sl {
                             g_Features[i].key, g_Features[i].wanted ? 1 : 0, g_Features[i].label);
         len += snprintf(buf + len, sizeof(buf) - len, "terraform_speed=%d    # animation speed while terraforming (1-60)\n",
                         (int)s_TerraformSpeed);
+        len += snprintf(buf + len, sizeof(buf) - len, "quick_start=%d    # press A for you on the title screen until you're on the island\n",
+                        s_QuickStart ? 1 : 0);
         len += snprintf(buf + len, sizeof(buf) - len,
                         "app_flip_y=%d    # Slumber app screen: -1 auto; 1 or 0 if it shows upside down\n", app::FlipOverride());
         if (!s_SdReady) return;
@@ -2333,6 +3634,10 @@ namespace sl {
                         app::SetFlipOverride(flip);
                         Log("app_flip_y = %d", flip);
                     }
+                }
+                if (strcmp(line, "quick_start") == 0) {
+                    bool on = eq[1] != '0';
+                    if (on != s_QuickStart) { s_QuickStart = on; Log("quick_start = %d", on ? 1 : 0); }
                 }
                 if (strcmp(line, "terraform_speed") == 0) {
                     int v = 0;
@@ -2464,6 +3769,299 @@ namespace sl {
         s_AppSave = true;
     }
 
+    /* ---- live debug channel ----
+       The watch thread reads slumbertoggle/cmd.txt (4x a second), runs its lines, writes the answers
+       to slumbertoggle/dbg_out.txt and deletes cmd.txt (work-tools/dbg.py does the round trip).
+       Nothing stops the game; every address is checked with svcQueryMemory first.
+       Addresses: names main, cam, player, layout, recs, hex numbers, + / -, [expr] = u64 at expr.
+         peek <addr> [words]          hex + float per word
+         poke <addr> <hex32>...       pokef <addr> <float>...
+         hold <addr> <float>          written every editor frame (8 max); unhold clears all
+         snap <addr> <bytes>          remember a block;  diff  lists words that changed since */
+    constexpr const char* CmdPath    = "slsd:/slumbertoggle/cmd.txt";
+    constexpr const char* DbgOutPath = "slsd:/slumbertoggle/dbg_out.txt";
+    static char s_DbgOut[0x8000];
+    static size_t s_DbgLen = 0;
+    struct DbgHold { uintptr_t addr; float v; };
+    static DbgHold s_Holds[8];
+    static std::atomic<int> s_HoldCount{0};
+    alignas(16) static u8 s_DbgSnap[0x40000];
+    static uintptr_t s_DbgSnapAddr = 0;
+    static size_t s_DbgSnapLen = 0;
+
+    static void DbgPrint(const char* fmt, ...) {
+        if (s_DbgLen >= sizeof(s_DbgOut) - 2) return;
+        va_list args;
+        va_start(args, fmt);
+        int n = vsnprintf(s_DbgOut + s_DbgLen, sizeof(s_DbgOut) - s_DbgLen - 1, fmt, args);
+        va_end(args);
+        if (n < 0) return;
+        s_DbgLen += (size_t)n;
+        if (s_DbgLen > sizeof(s_DbgOut) - 2) s_DbgLen = sizeof(s_DbgOut) - 2;
+        s_DbgOut[s_DbgLen++] = '\n';
+    }
+
+    static bool MemOk(uintptr_t a, size_t len, bool write) {
+        while (len) {
+            MemoryInfo mi = {};
+            u32 pi = 0;
+            if (R_FAILED(svcQueryMemory(&mi, &pi, a))) return false;
+            if (!(mi.perm & (write ? 2 : 1)) || mi.type == 0) return false;
+            uintptr_t end = mi.addr + mi.size;
+            if (end <= a) return false;
+            size_t chunk = end - a < len ? end - a : len;
+            a += chunk; len -= chunk;
+        }
+        return true;
+    }
+
+    static const char* SkipWs(const char* p) { while (*p == ' ' || *p == '\t') p++; return p; }
+
+    static bool DbgExpr(const char*& p, uintptr_t* out);
+    static bool DbgTerm(const char*& p, uintptr_t* out) {
+        p = SkipWs(p);
+        if (*p == '[') {
+            p++;
+            uintptr_t a;
+            if (!DbgExpr(p, &a)) return false;
+            p = SkipWs(p);
+            if (*p != ']') return false;
+            p++;
+            if (!MemOk(a, 8, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return false; }
+            *out = *reinterpret_cast<const uintptr_t*>(a);
+            return true;
+        }
+        struct { const char* name; uintptr_t v; } names[] = {
+            { "main", exl::util::modules::GetTargetStart() }, { "cam", (uintptr_t)s_DbgCam },
+            { "player", (uintptr_t)s_LocalPlayer }, { "layout", (uintptr_t)s_EditLayout },
+            { "recs", (uintptr_t)BuildingRecords() }, { "xowner", (uintptr_t)s_XOwner }, { "xarea", (uintptr_t)s_XArea },
+            { "xe", (uintptr_t)XObjOfCtx(s_EditECtx) }, { "xs", (uintptr_t)XObjOfCtx(s_EditSCtx) },
+            { "mod", exl::util::modules::GetSelfStart() },
+        };
+        for (auto& n : names) {
+            size_t l = strlen(n.name);
+            if (strncmp(p, n.name, l) == 0 && !((p[l] >= 'a' && p[l] <= 'z') || (p[l] >= '0' && p[l] <= '9'))) {
+                p += l; *out = n.v;
+                return true;
+            }
+        }
+        char* end = nullptr;
+        unsigned long long v = strtoull(p, &end, 16);
+        if (end == p) return false;
+        p = end; *out = (uintptr_t)v;
+        return true;
+    }
+    static bool DbgExpr(const char*& p, uintptr_t* out) {
+        uintptr_t v;
+        if (!DbgTerm(p, &v)) return false;
+        while (true) {
+            p = SkipWs(p);
+            if (*p != '+' && *p != '-') break;
+            char op = *p++;
+            uintptr_t t;
+            if (!DbgTerm(p, &t)) return false;
+            v = op == '+' ? v + t : v - t;
+        }
+        *out = v;
+        return true;
+    }
+
+    /* Editor frames: keep the held values. */
+    void DbgApplyHolds() {
+        int n = s_HoldCount.load(std::memory_order_acquire);
+        for (int i = 0; i < n; i++) *reinterpret_cast<float*>(s_Holds[i].addr) = s_Holds[i].v;
+    }
+
+    static void DbgLine(char* line) {
+        const char* p = SkipWs(line);
+        if (!*p || *p == '#') return;
+        char cmd[16] = {};
+        int ci = 0;
+        while (*p && *p != ' ' && ci < 15) cmd[ci++] = *p++;
+        DbgPrint("> %s", line);
+        if (strcmp(cmd, "find") == 0) {   /* find <hex bytes> [max hits]: every readable+writable region */
+            u8 pat[64];
+            int pn = 0;
+            p = SkipWs(p);
+            while (*p && *p != ' ' && pn < 64) {
+                auto hexv = [](char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1; };
+                int hi = hexv(p[0]), lo = p[1] ? hexv(p[1]) : -1;
+                if (hi < 0 || lo < 0) break;
+                pat[pn++] = (u8)(hi * 16 + lo);
+                p += 2;
+            }
+            long maxHits = strtol(SkipWs(p), nullptr, 0);
+            if (maxHits <= 0) maxHits = 32;
+            if (pn < 2) { DbgPrint("! pattern too short"); return; }
+            int hits = 0;
+            u64 a = 0, scanned = 0;
+            while (a < 0x8000000000ull && hits < maxHits) {
+                MemoryInfo mi = {};
+                u32 pi = 0;
+                if (R_FAILED(svcQueryMemory(&mi, &pi, a)) || mi.addr + mi.size <= a) break;
+                if ((mi.perm & 3) == 3 && mi.type != 0 && mi.size < 0x100000000ull) {
+                    const u8* base = reinterpret_cast<const u8*>(mi.addr);
+                    /* The game keeps allocating / freeing while this runs (seen on a Switch: a region
+                       shrank mid-scan and the read faulted, crashing the game). Re-check each 4 KB page
+                       just before reading it, compare byte by byte (memcmp's wide loads can run past
+                       the end), and stop at the first page that isn't readable+writable any more. */
+                    u64 okTo = 0;
+                    for (u64 o = 0; o + pn <= mi.size && hits < maxHits; o += 2) {
+                        if (o + pn > okTo) {
+                            MemoryInfo pm = {};
+                            u32 ppi = 0;
+                            u64 at = mi.addr + ((o + pn - 1) & ~0xfffull);
+                            if (R_FAILED(svcQueryMemory(&pm, &ppi, at)) || (pm.perm & 3) != 3 || pm.type == 0) break;
+                            okTo = pm.addr + pm.size - mi.addr;
+                            if (okTo > ((o + pn - 1) & ~0xfffull) + 0x1000) okTo = ((o + pn - 1) & ~0xfffull) + 0x1000;
+                        }
+                        if (base[o] != pat[0]) continue;
+                        int k = 1;
+                        while (k < pn && base[o + k] == pat[k]) k++;
+                        if (k != pn) continue;
+                        if (base + o == pat) continue;
+                        DbgPrint("hit %lx (region %lx +%lx, type %x)", (unsigned long)(mi.addr + o), (unsigned long)mi.addr, (unsigned long)o, mi.type);
+                        hits++;
+                    }
+                    scanned += mi.size;
+                }
+                a = mi.addr + mi.size;
+            }
+            DbgPrint("%d hits, %lu MB scanned", hits, (unsigned long)(scanned >> 20));
+            return;
+        }
+        if (strcmp(cmd, "unhold") == 0) { s_HoldCount.store(0); DbgPrint("holds cleared"); return; }
+        if (strcmp(cmd, "xrec") == 0) {   /* xrec: clear and start recording XLink searches / emits */
+            s_XSearchN.store(0); s_XEmitN.store(0); s_XRecord.store(1); DbgPrint("recording"); return;
+        }
+        if (strcmp(cmd, "xlog") == 0) {   /* xlog: stop recording, list what was recorded (non-ASCII names, i.e. keywords) */
+            s_XRecord.store(0);
+            u32 ns = s_XSearchN.load(), ne = s_XEmitN.load();
+            DbgPrint("%u searches, %u emits", ns, ne);
+            int shown = 0;
+            for (u32 k = (ns > 256 ? ns - 256 : 0); k < ns && shown < 120; k++) {
+                const XSearchRec& r = s_XSearch[k & 255];
+                bool kw = false;
+                for (const char* c = r.name; *c; c++) if ((u8)*c >= 0x80) kw = true;
+                if (!kw) continue;
+                DbgPrint("S ctx %lx asset %lx %s", (unsigned long)r.ctx, (unsigned long)r.asset, r.name); shown++;
+            }
+            for (u32 k = (ne > 256 ? ne - 256 : 0); k < ne && shown < 240; k++, shown++)
+                DbgPrint("E obj %lx ctx %lx asset %lx", (unsigned long)s_XEmit[k & 255].obj, (unsigned long)s_XEmit[k & 255].ctx, (unsigned long)s_XEmit[k & 255].asset);
+            return;
+        }
+        if (strcmp(cmd, "diff") == 0) {
+            if (!s_DbgSnapLen || !MemOk(s_DbgSnapAddr, s_DbgSnapLen, false)) { DbgPrint("! no snapshot"); return; }
+            const u8* now = reinterpret_cast<const u8*>(s_DbgSnapAddr);
+            int n = 0;
+            for (size_t o = 0; o + 4 <= s_DbgSnapLen && n < 400; o += 4) {
+                u32 a = *reinterpret_cast<const u32*>(s_DbgSnap + o), b = *reinterpret_cast<const u32*>(now + o);
+                if (a == b) continue;
+                float fa, fb;
+                memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
+                DbgPrint("+%05lx  %08x -> %08x   %.4f -> %.4f", (unsigned long)o, a, b, (double)fa, (double)fb);
+                n++;
+            }
+            DbgPrint("%d words changed%s", n, n >= 400 ? " (list cut at 400)" : "");
+            return;
+        }
+        uintptr_t a;
+        if (!DbgExpr(p, &a)) { DbgPrint("! bad address"); return; }
+        if (strcmp(cmd, "addr") == 0) { DbgPrint("= %lx (main+%lx)", (unsigned long)a, (unsigned long)(a - exl::util::modules::GetTargetStart())); return; }
+        if (strcmp(cmd, "emit") == 0) {   /* emit <obj> <keyword>: XLink keyword on an XLink object (game thread; result in log.txt) */
+            if (s_EmitPending.load()) { DbgPrint("! an emit is still pending"); return; }
+            if (!MemOk(a, 0x38, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            const char* nm = SkipWs(p);
+            size_t n = strlen(nm);
+            while (n && (nm[n - 1] == '\r' || nm[n - 1] == '\n' || nm[n - 1] == ' ')) n--;
+            if (!n || n >= sizeof(s_EmitName)) { DbgPrint("! bad keyword"); return; }
+            memcpy(s_EmitName, nm, n); s_EmitName[n] = 0;
+            s_EmitObj = a;
+            s_EmitPending.store(1, std::memory_order_release);
+            DbgPrint("queued (see log.txt)");
+            return;
+        }
+        if (strcmp(cmd, "peek") == 0) {
+            long words = strtol(SkipWs(p), nullptr, 0);
+            if (words <= 0) words = 16;
+            if (words > 1024) words = 1024;
+            if (!MemOk(a, words * 4, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            for (long i = 0; i < words; i++) {
+                u32 w = reinterpret_cast<const u32*>(a)[i];
+                float f;
+                memcpy(&f, &w, 4);
+                DbgPrint("%lx +%03lx  %08x  %.4f", (unsigned long)(a + i * 4), (unsigned long)(i * 4), w, (double)f);
+            }
+            return;
+        }
+        if (strcmp(cmd, "snap") == 0) {
+            long len = strtol(SkipWs(p), nullptr, 0);
+            if (len <= 0 || len > (long)sizeof(s_DbgSnap)) len = sizeof(s_DbgSnap);
+            if (!MemOk(a, len, false)) { DbgPrint("! cannot read %lx", (unsigned long)a); return; }
+            memcpy(s_DbgSnap, reinterpret_cast<const void*>(a), len);
+            s_DbgSnapAddr = a; s_DbgSnapLen = len;
+            DbgPrint("snapshot of %lx, %ld bytes", (unsigned long)a, len);
+            return;
+        }
+        bool isF = strcmp(cmd, "pokef") == 0, isHold = strcmp(cmd, "hold") == 0;
+        if (strcmp(cmd, "poke") == 0 || isF || isHold) {
+            int i = 0;
+            p = SkipWs(p);
+            while (*p) {
+                char* end = nullptr;
+                u32 w;
+                if (isF || isHold) { float f = strtof(p, &end); memcpy(&w, &f, 4); }
+                else w = (u32)strtoul(p, &end, 16);
+                if (end == p) break;
+                p = SkipWs(end);
+                uintptr_t at = a + i * 4;
+                if (!MemOk(at, 4, true)) { DbgPrint("! cannot write %lx", (unsigned long)at); return; }
+                if (isHold) {
+                    int n = s_HoldCount.load();
+                    if (n >= 8) { DbgPrint("! 8 holds already"); return; }
+                    memcpy(&s_Holds[n].v, &w, 4);
+                    s_Holds[n].addr = at;
+                    s_HoldCount.store(n + 1, std::memory_order_release);
+                }
+                *reinterpret_cast<u32*>(at) = w;
+                DbgPrint("%s %lx = %08x", isHold ? "held" : "wrote", (unsigned long)at, w);
+                i++;
+            }
+            return;
+        }
+        DbgPrint("! unknown command '%s'", cmd);
+    }
+
+    static void DbgPoll() {
+        nn::fs::FileHandle h;
+        if (R_FAILED(nn::fs::OpenFile(&h, CmdPath, nn::fs::OpenMode_Read))) return;
+        long size = 0;
+        nn::fs::GetFileSize(&size, h);
+        static char buf[4096];
+        if (size > (long)sizeof(buf) - 1) size = sizeof(buf) - 1;
+        if (size < 0) size = 0;
+        nn::fs::ReadFile(h, 0, buf, size);
+        nn::fs::CloseFile(h);
+        buf[size] = 0;
+        s_DbgLen = 0;
+        for (char* line = buf; line && *line;) {
+            char* next = strchr(line, '\n');
+            if (next) *next++ = 0;
+            size_t l = strlen(line);
+            if (l && line[l - 1] == '\r') line[l - 1] = 0;
+            DbgLine(line);
+            line = next;
+        }
+        DbgPrint("# done");
+        nn::fs::DeleteFile(DbgOutPath);
+        nn::fs::CreateFile(DbgOutPath, s_DbgLen);
+        if (R_SUCCEEDED(nn::fs::OpenFile(&h, DbgOutPath, nn::fs::OpenMode_Write))) {
+            nn::fs::WriteFile(h, 0, s_DbgOut, s_DbgLen, nn::fs::WriteOption::CreateOption(nn::fs::WriteOptionFlag_Flush));
+            nn::fs::CloseFile(h);
+        }
+        nn::fs::DeleteFile(CmdPath);
+    }
+
     /* ---- startup ---- */
 
     alignas(0x1000) static u8 s_ThreadStack[0x4000];
@@ -2471,7 +4069,10 @@ namespace sl {
 
     static void WatchThread(void*) {
         while (true) {
-            nn::os::SleepThread(nn::TimeSpan::FromSeconds(1));
+            for (int q = 0; q < 4; q++) {   /* debug commands 4x a second */
+                nn::os::SleepThread(nn::TimeSpan::FromMilliSeconds(250));
+                DbgPoll();
+            }
             FlushLog();
             if (s_AppSave.exchange(false)) WriteDefaultToggles();   /* changes made in the Slumber app */
             if (ReadToggles()) ApplyAll();
@@ -2494,7 +4095,7 @@ namespace sl {
             nn::fs::CreateFile(LogPath, 0);
             s_SdReady = true;
         }
-        Log("SlumberToggle v0.63 - main base %lx", exl::util::modules::GetTargetStart());
+        Log("SlumberToggle v0.67-furn29 - main base %lx", exl::util::modules::GetTargetStart());
 
         Log("Slumber app screen: NVN hook %s, %d controller hooks, allocator %s",
             g_AppNvnHook ? "on" : "MISSING", g_AppNpadHooks, g_AppAlloc ? "found" : "MISSING");
@@ -2792,7 +4393,15 @@ HOOK_DEFINE_TRAMPOLINE(EditRequestGate) {
 /* "Warp the player to the room entrance while editing" (player state 0x61). */
 HOOK_DEFINE_TRAMPOLINE(EditWarpCheck) {
     static u32 Callback() {
-        if (sl::EditorMap()) return sl::EditorWarpAllowed() ? 1 : 0;
+        if (sl::EditorMap()) {
+            /* Seamless exit: no game warp (it plays a ~1 s wipe to hide the jump); the player is put at
+               the cursor here and now, where the edit camera already looks (tested in Eden). */
+            if (sl::EditorWarpAllowed()) {
+                sl::Vec3f v;
+                if (sl::EditorWarpTarget(&v)) sl::EditorPlacePlayerNow(v);
+            }
+            return 0;
+        }
         return Orig();
     }
 };
@@ -2834,6 +4443,30 @@ HOOK_DEFINE_TRAMPOLINE(EditCursorCentre) {
 /* "Can the held item go here?" (x0 = drag holder; +0x88 set = cache the answer at +0x78).
    0x13f20f8 puts the item at the target when this says yes, else back where it came from.
    On the main island the answer is always yes (the game's own check still runs first). */
+/* XLink keyword search (ctx, name) -> asset and emit (obj, {vt, asset, flag}, handle*): recorded for
+   dbg "xrec" / "xlog". */
+HOOK_DEFINE_TRAMPOLINE(XLinkSearch) {
+    static void* Callback(void* ctx, const char* name) {
+        void* r = Orig(ctx, name);
+        sl::XRecSearch(ctx, name, r);
+        return r;
+    }
+};
+HOOK_DEFINE_TRAMPOLINE(XLinkEmitHook) {
+    static u64 Callback(u8* obj, void* q, void* out) {
+        sl::XRecEmit(obj, q);
+        return Orig(obj, q, out);
+    }
+};
+
+/* Editor's garden-edit-area effect update (x0 = area effect, x1 = the cursor's XLink owner). */
+HOOK_DEFINE_TRAMPOLINE(EditAreaFx) {
+    static void Callback(u8* area, u8* owner) {
+        sl::CaptureEditXLink(area, owner);
+        Orig(area, owner);
+    }
+};
+
 HOOK_DEFINE_TRAMPOLINE(EditCanPlace) {
     static u32 Callback(u8* holder, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
         u32 r = Orig(holder, a1, a2, a3, a4, a5, a6, a7);
@@ -2849,6 +4482,31 @@ HOOK_DEFINE_TRAMPOLINE(EditCameraFocus) {
         sl::Vec3f v;
         if (sl::EditCameraTarget(&v)) return v;
         return Orig();
+    }
+};
+
+/* Edit camera point = look-at + offset (x0 = camera, x1 = out). */
+HOOK_DEFINE_TRAMPOLINE(EditCameraPointHook) {
+    static void Callback(u8* cam, sl::Vec3f* out) {
+        Orig(cam, out);
+        sl::EditCameraPoint(cam, out);
+    }
+};
+
+/* Generic state machine change-state (x0 = state machine, w1 = new state). */
+HOOK_DEFINE_TRAMPOLINE(StateChangeHook) {
+    static void Callback(u8* sm, u32 state) {
+        if (sl::BlockCameraState(sm, state)) return;
+        Orig(sm, state);
+    }
+};
+
+/* Edit camera zoom blend (x0 = delegate owner, x1 = params); Vec3 back in s0-s2. */
+HOOK_DEFINE_TRAMPOLINE(EditCameraZoomHook) {
+    static sl::Vec3f Callback(u8* self, u8* params) {
+        sl::Vec3f v = Orig(self, params);
+        sl::EditCameraZoom(self, &v);
+        return v;
     }
 };
 
@@ -2882,10 +4540,27 @@ HOOK_DEFINE_INLINE(ThemeBannerHide) {
     }
 };
 
+/* The island editor's screen change plays HHP's interior wipe (~1.2 s each way). The wipe page
+   (x19 in its command handlers 0x2cb5bc4 / 0x2cb5dc0 / 0x2cb5ed4 and its update 0x2cb73d0) holds
+   five wipe layouts, +0x244 = the one in use (2 = WipeInteriorWherearenIslands); each handler
+   starts an animation and sets its speed with s0 = 1.0 through vfunc +0x190. On the island editor
+   map that wipe runs WipeSpeed times faster, so the screen changes almost at once while the game's
+   own wipe logic (and whatever waits for it) runs as before. Door and other wipes are untouched. */
+constexpr float WipeSpeed = 120.0f;
+
+HOOK_DEFINE_INLINE(EditorWipeSpeed) {
+    static void Callback(exl::hook::InlineFloatCtx* ctx) {
+        u8* page = reinterpret_cast<u8*>(ctx->X[19]);
+        if (!page || !sl::EditorMap()) return;
+        if (*reinterpret_cast<const u32*>(page + 0x244) != 2) return;
+        ctx->S[0] = WipeSpeed;
+    }
+};
+
 /* HHP's per-frame house hover (0x13cfd7c: play mode == HHP?) also runs on the main island. */
 HOOK_DEFINE_INLINE(BuildingHoverGate) {
     static void Callback(exl::hook::InlineCtx* ctx) {
-        if (sl::EditorMap()) ctx->X[8] = ctx->X[11];
+        if (sl::EditorMap()) { ctx->X[8] = ctx->X[11]; sl::CursorHeartbeat(); }
     }
 };
 
@@ -3003,7 +4678,7 @@ HOOK_DEFINE_TRAMPOLINE(TabStripStart) {
 /* House menu: A on a grid cell. */
 HOOK_DEFINE_TRAMPOLINE(HomeGridPick) {
     static void Callback(u8* menu, u8* event, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
-        if (sl::HomeGridPick(menu, event)) return;
+        sl::HomeGridPick(menu, event);
         Orig(menu, event, a2, a3, a4, a5, a6, a7);
     }
 };
@@ -3162,6 +4837,8 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadDetail##type) {                                               \
         static int Callback(int* written, void* states, int count, const u32& id) {          \
             int r = Orig(written, states, count, id);                                        \
+            sl::QuickStartPad(states, count);                                \
+            sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
             return r;                                                                        \
         }                                                                                    \
@@ -3169,12 +4846,16 @@ HOOK_DEFINE_TRAMPOLINE(NvnBootstrap) {
     HOOK_DEFINE_TRAMPOLINE(NpadStates##type) {                                               \
         static void Callback(void* states, int count, const u32& id) {                       \
             Orig(states, count, id);                                                         \
+            sl::QuickStartPad(states, count);                                \
+            sl::EditorPad(states, count);                                     \
             sl::app::OnNpadStates(states, count);                                            \
         }                                                                                    \
     };                                                                                       \
     HOOK_DEFINE_TRAMPOLINE(NpadState##type) {                                                \
         static void Callback(void* state, const u32& id) {                                   \
             Orig(state, id);                                                                 \
+            sl::QuickStartPad(state, 1);                                       \
+            sl::EditorPad(state, 1);                                           \
             sl::app::OnNpadStates(state, 1);                                                 \
         }                                                                                    \
     };
@@ -3241,7 +4922,13 @@ extern "C" void exl_main(void* x0, void* x1) {
     EditStart::InstallAtOffset(0x13c97d0);
     EditCursorCentre::InstallAtOffset(0x13d5d30);
     EditCameraFocus::InstallAtOffset(0x7f9070);
+    EditCameraPointHook::InstallAtOffset(0x7d10d4);
+    EditCameraZoomHook::InstallAtOffset(0x7cfa20);
+    StateChangeHook::InstallAtOffset(0x3dbb160);
     EditCanPlace::InstallAtOffset(0x13ea4c0);
+    EditAreaFx::InstallAtOffset(0x13b9f78);
+    XLinkSearch::InstallAtOffset(0x3af5ec0);
+    XLinkEmitHook::InstallAtOffset(0x3af47b0);
     BuildingHoverGate::InstallAtOffset(0x13cfd7c);
     BuildingAtCell::InstallAtOffset(0x13d0308);
     BuildingHover::InstallAtOffset(0x13f1bc4);
@@ -3288,6 +4975,8 @@ extern "C" void exl_main(void* x0, void* x1) {
     RiverDigExit::InstallAtOffset(0x2295320);
     RiverBuryExit::InstallAtOffset(0x22954c4);
     ThemeBannerHide::InstallAtOffset(0x345d81c);
+    /* the speed setter right after "fmov s0, #1.0" in each wipe command */
+    for (u32 off : { 0x2cb5c88u, 0x2cb5e80u, 0x2cb5f98u, 0x2cb75fcu }) EditorWipeSpeed::InstallAtOffset(off);
 }
 
 extern "C" NORETURN void exl_exception_entry() {

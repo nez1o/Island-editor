@@ -161,11 +161,25 @@ manager (`*(main+0x4ca7238)+0x65838`, 2 x 0x14c) and NOPs `0x987e14` (`tbz w8,#0
 ### Island editor (`island_editor`)
 HHP's outdoor editor on the main island, from a phone app in the hidden DIY Recipes slot (3 or 4).
 - Make it run outside HHP: area check `0x13e44ac` -> true, request gate `0x32fa3b0` -> true, warp check `0x15dc334`,
-  edit area `0x13b8fc4` = whole island (grid x160..1280, z160..1120; 1 tile = 10 units, origin incl. the sea ring).
+  edit area `0x13b8fc4` = the whole map incl. the 1-acre sea ring (x10..1430, z10..1270; 1 tile = 10 units; the
+  island grid is x160..1280, z160..1120). The middle must stay (720, 640): closing is recognised by it.
 - Camera/cursor: look-at `0x7f9070` (Vec3 in s0-s2), centring `0x13d5d30`, start `0x13c97d0`, cursor 1.25x via misc
   params `0x13c9440`. Place anywhere: can-place `0x13ea4c0` -> yes.
-- Close: teleport to the cursor (warp check + target `0x2309d50`; also write saved pos player+0xba4).
-- Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)`.
+- Close: the player goes to the cursor, clamped to the island grid so a cursor out at sea doesn't drop the player in
+  the water. The game's warp (warp check answering 1, then target `0x2309d50`) played a ~1 s wipe, so the warp
+  check now answers 0 and the module writes the spot itself: saved pos player+0xba4, the position request
+  *(player+0x4c8)+0x2e8 (flags +0x2e4..6) and the live position player+0x29a0. Exit is seamless. Pressing B first snaps the cursor to the
+  area middle (not through `0x13d5d30`) while the edit camera still runs; the camera then keeps the last real spot
+  (`s_EditClosing`), otherwise it swung to the map middle for a moment.
+- Open request: `UiRequest 0x2df7b98(*(main+0x55b6f18), 0x6f, {player idx}, 0)` (its last argument is unused).
+- Screen-change wipe: opening and closing the editor play HHP's interior wipe, ~1.2 s each way. The wipe page holds
+  five layouts at +0x218..+0x238 (WipeInterior, Studio, WherearenIslands, CloudIsland, HotelRoom); +0x244 = the
+  one in use (2 here), +0x248 = command run by its update `0x2cb73d0` (handlers `0x2cb5bc4` / `0x2cb5dc0` /
+  `0x2cb5ed4`, page in x19). Each starts the animation and sets its speed (`fmov s0, #1.0`, vfunc +0x190). On the
+  editor map with index 2, a float inline hook on those `ldr x8, [x8, #0x190]` (`0x2cb5c88`, `0x2cb5e80`,
+  `0x2cb5f98`, `0x2cb75fc`) makes it 120x (12x and 30x were still visible): the wipe finishes in one frame and the game's wipe logic is unchanged.
+  Careful when probing this page: its code also runs during loading, and a probe that logged there hung the boot;
+  exlaunch's InlineCtx has only x0..x30 (X[31] is not sp), so don't walk the stack from it.
 - **Buildings**: HHP house hover `0x13cef20` -> gate `0x13cfd7c` (inline) -> lookup `0x13d0308` -> `0x13f1bc4` ->
   edit object `0x13ba988`. The mod supplies a fake component (copy of game vtable `0x49a5880`, own slots for pos /
   grab / cancel / drag / valid / drop). Records: `0x1260490(list, i)` (returns via x8). Collision follows via
@@ -207,6 +221,75 @@ HHP's outdoor editor on the main island, from a phone app in the hidden DIY Reci
 - Not done: Tom Nook-style moves of villager houses (record move alone made the house invisible), camera zoom/tilt
   (rewriting the pose each frame jittered).
 
+#### Spawn menu (D-pad left), branch `fix/editor-camera-area` — status 2026-11-22, build v0.64-spawntest18
+Spawns bridges / inclines at the cursor from HHP's exterior menu, opened on a borrowed house.
+- D-pad left in cursor mode (heartbeat from the hover gate `0x13cfd7c`) arms a spawn; X is fed in 60-110 ms
+  later; the hover borrows the first house; the menu starts on the Bridges tab; a grid pick calls
+  `SpawnStructure` (first empty record, cursor position /5, rotation 0, `k_BridgeIds[cell][0]` / `k_InclineIds`).
+  Spawned records are kept in `s_New` (`KeepNew` writes them back when the editor's closing restore empties them).
+- **Zoom fix**: the menu zooms by switching the edit camera's state machine (camera+0x408, current state
+  +0x410) from the editor camera (0x13) to `CamState::cDemo` (0x22) via the generic change-state `0x3dbb160`;
+  `BlockCameraState` refuses 0x22 for that state machine while a spawn menu is armed / open (tested, works).
+- Camera hold (`SpawnCameraHold`) releases after 0.8 s without a menu or once the cursor moves 12+ away.
+- Grab moves only the structure's own body (a neighbour bridge used to come along). Bridges may stack.
+- **Remove prompt**: building component slot `0xb0` = "can be removed" (found live by flipping the 8
+  return-0 slots `0x80`-`0xb8`): yes makes the editor show its own "Y Remove". `BldCanRemove` says yes only
+  for bridges / inclines and never around a spawn menu (yes on every building -> editor stuck after a spawn
+  menu closed, needed a restart). Y / ZL / ZR on a nearby structure are handled in `EditorPad` and hidden
+  from the game: Y removes (`RemoveStructure`), ZL turns a quarter (record +6), ZR cycles size
+  (`k_BridgeIds[material][0..5]`), ZL/ZR only for spawned ones (`ReshapeStructure`). test18 untested.
+- **Save copies (fixed in spawntest22)**: Save and End wrote building changes from a copy the mod didn't
+  update (a removed bridge came back after a reload, a spawned one vanished). The save object
+  `x = *(*(save root+0x10))` (save root = `*(main+0x5474040)`) holds the live main.dat image at x+0x10
+  (building list at +0x32f700 = `BuildingRecords()`) and two more full images: `*(x+0x18)` and
+  `*(x+8)+0x250` (inline in an object). Zeroing a removed bridge's record in both, live via dbg.py, kept it
+  removed after Save and End + reload. `SyncSaveCopies()` copies the 47-record list into both after
+  `WriteRecord`, `SaveBuildingMove` and `RebuildShapes` (only if a copy's first 16 bytes match the live
+  header). A 4th image sits in another heap region (no pointer path known); it wasn't needed.
+- **Menu close is not an editor close (spawntest20/21)**: closing HHP's exterior menu (spawn menu, B) also
+  re-centres the cursor on the area middle and runs the warp check, so the mod took it for the editor
+  closing (player moved, `s_EditClosing` stuck -> Y/ZL/ZR ignored, Y then went to the game and froze the
+  editor). Now a close needs B pressed in cursor mode with no spawn menu (`s_CursorBAt`, `ClosedWithB()`).
+- Live tests 2026-11-23 (spawntest20/21): Y remove, ZL turn, ZR resize work. Wishes: sound + dust cloud /
+  sparkles on removal, smooth turn/resize with fitting sounds.
+- `dbg.py find` over all memory takes ~5 min in Eden and blocks the watch thread (log, cmd.txt) meanwhile;
+  dbg.py gives up after 30 s, so poll `dbg_out.txt` yourself.
+- **D-pad left icon (romfs, `tools/dpad_icon.py`, works, checked on a Switch 2026-11-26)**: the editor's
+  D-pad guide is `Layout/InteriorWherearenIslands`, drawn twice; the copy on screen is N_InOutLeft_01 >
+  N_Type_02 (sun on top, faded left arrow P_JujiL_05). Animation `_KeyLeft` (step keys, applied when the
+  editor opens, not every frame) picks the left slot; frame 2 = seasons (N_KeyLeft_03 / _02 with
+  P_Season_01 / _00); the island editor runs at frame 0. The tool shows the season slot at frame 0 too and
+  gives its icons a texture pattern (frame 0 = new `IconSpawnDpad^s`, else the game's season icon).
+  Dead ends: N_TypeInside_05 / N_Type_06 (the other copy, drawn but not visible) and `Layout/LRoomGuide`.
+  Found by poking pane visible bits live (pane +0x58 bit 0; name at +0xb0, parent +0x18).
+- **Real Switch workflow**: FTP (sys-ftpd-light, port 5000) for files; `SWITCH_FTP=<ip>:5000 tools/dbg.py`
+  for live memory (a full `find` takes ~40 s on a Switch vs ~5 min in Eden). Keep the console's own
+  exefs/main.npdm (the exlaunch one lacks services the real game needs). Screenshots: /Nintendo/Album.
+  spawntest23: `find` re-checks each page before reading (a scan crashed the game when memory was freed).
+- **Buildings tab (v0.65, works on a Switch 2026-11-26)**: tab 7 (kind 0x7d, label 1292) in the spawn
+  menu places copies of Nook's Cranny (19), Museum (21), Resident Services (20), Able Sisters (24),
+  Campsite (25) (`k_BuildingCells`). Tested first by writing records straight into a save (all three
+  images): copies load and save; a copy's door leads into the original. Y removes a copy (a record of
+  those types with an earlier record of the same type; never the original), deleting every actor of the
+  record (a moved building briefly keeps its old actor). Pictures: `tools/building_icons.py` (pixel art,
+  Model/Layout_HouseShapeIcon_H0..H4); names STR_HouseRoofName 60020+. `tools/build_tabs.py` rebuilds just
+  the menu files into an existing mod romfs (TAB_ICONS_ONLY=H keeps the bridge pictures).
+  The game builds houses / shops at the cliff level's height, so on the beach they floated:
+  `SnapBuildingsToGround` (every 20 frames, main island) moves each one's body + parts to the ground
+  height at its middle. Spawn picks within 10 s of D-pad left count even if the spawn timing missed the
+  menu opening (it opened slower on a Switch). Not done: collision of a freshly placed building (until
+  reload), empty houses / decorations (types not tested).
+- Still to do: Buildings tab (empty houses, shops & services, decorations) with pixel-art icons
+  (`tools/bridges_tab.py` / `bridge_icons.py` show how tabs and icons are added), the D-pad left icon in the
+  editor's D-pad guide (empty left slot), remove the test logging (camera snapshot/diff, zoom logs) before a release.
+
+#### Live debug channel (spawntest14+)
+`tools/dbg.py` (Windows / Linux) talks to the module through `slumbertoggle/cmd.txt` / `dbg_out.txt` on
+Eden's SD card; the watch thread answers 4x a second, nothing pauses the game, every address is checked
+with `svcQueryMemory`. Typical use: `snap cam 38000`, do the thing in game, `diff`. Symbols of the module
+itself: `aarch64-none-elf-nm -C SlumberToggle.elf | grep name`, then `mod+<offset>` (e.g. live-patching our
+component vtable `sl::s_BldVt`). Prefer this to GDB (GDB pauses the game; it froze several times).
+
 ### Unlock all (`unlock_all`)
 Once per session on the island: player flags via `0x264bfe8(idx*, SafeString*, 1)` for every existing player,
 HHP flags via `0x2658bb8(SafeString*, 1)`. Names come from `Bcsv/EventFlagsPlayerParam` and
@@ -233,3 +316,19 @@ Trampolines on the cliff/river tool state exec/exit handlers (`0x229dcd8`, `0x22
   no single gate found yet. Planned: differential function scan on an emulator (still vs walking into a wall).
 - Trees/bushes from the Slumber catalog on the main island once froze the game when entering a building:
   don't place plants from the Slumber catalog until investigated.
+
+#### 2026-11-26 (furn9-furn29, Switch)
+- Squares: drawn at the comp's BldPos (slot 0x20) result; size = fake owner footprint (+0x5b8/+0x5bc, W = v+1
+  with +0x5a8 = 0, D = v+1 with +0x5ac = 1), snapped to whole tiles by 0x2a85468 (odd sizes centre on a tile
+  middle, even on a tile line) -> FootOf picks the size parity; max 5 tiles per axis (6 draws nothing). The
+  highlight is an overlay: its height (BldPos y, hover query +0x2c) changes nothing.
+- Held structures bob / glide; drop bounce; turn = old actor dips, new one pops (scale body +0x818 and y are
+  live; the turn itself is baked at spawn). Removal shrinks (6 frames).
+- Y removes any building except player houses (1-8), Resident Services (20), Airport (22) (copies of those may go).
+- Buildings tab: 10 cells (19 21 20 24 25 28 23 29 42 9); 42 = StrcHotelA00 (Paradise Planning office).
+  Building types 30 and 31 spawn nothing (record left with no actor: clear it). Names show "(N left)":
+  STR_HouseRoofName 61000/62000/63000 + cell*50 + n (bridges_tab.py), n = SpawnSpacesLeft().
+- Walls for tab-placed buildings: RebuildShapes runs the house builder (0x2a3a450) for them.
+- quick_start (toggles.txt): A pressed from boot until the player is on the island.
+- HHP facilities (school, cafe...) are baked into FldOutCenterIsland01..07, not separate buildings.
+- SysDVR (Wi-Fi, RTSP :6666) on the Switch: ffmpeg -rtsp_transport tcp -i rtsp://<ip>:6666/ -frames:v 1 x.jpg

@@ -551,6 +551,8 @@ if ADEN_ROMFS:
         layout_msg_size[lang] = max(layout_msg_size[lang], decompressed_size(os.path.join(ADEN_OUT, 'Message', 'LayoutMsg_%s.sarc.zs' % lang)))
 import bridges_tab   # the Bridges tab of the HHP house menu (island editor)
 bridges_sizes = bridges_tab.build(ROMFS, OUT, sarc_files, sarc_rebuild, sarc_read, sarc_write, msbt_read, msbt_write)
+import dpad_icon     # the D-pad left (spawn) icon in the island editor's D-pad guide
+bridges_sizes.update(dpad_icon.build(ROMFS, OUT, sarc_files, sarc_rebuild))
 build_rstb(dict(bridges_sizes, **{
     'Layout/LMenuDeviceBtn.Nin_NX_NVN': phone_layout_size,
     'Message/TalkSys_USen.sarc': decompressed_size(os.path.join(OUT, 'Message', 'TalkSys_USen.sarc.zs')),
