@@ -343,3 +343,9 @@ Trampolines on the cliff/river tool state exec/exit handlers (`0x229dcd8`, `0x22
   spot): spot check 0x21beacc -> 1, put step 0x13e0a20 -> always put, fence rect check 0x10f3270 keeps only the
   "tile already has an item" test, cursor blocked flag 0x13c76f8 -> 0 (stays blue). dbg `patch <addr> <word>`
   writes code live. Items placed at half-tile spots by the editor can block a fence's tile.
+- **Terraform anywhere (v0.70)**: field checker 0x11f2e18..0x11f88f0. Each terraform checker ends in a failure tail
+  ("ldr w8, [sp, #flag]; cbz w8, <success>"): cliff create 0x11f5700, river make 0x11f3c04, cliff/river break
+  0x11f6e08, water remove 0x11f3414 -> always branch to success. Named checks skipped too: tree tests
+  (0x11ffd88 callers), building ground marker (tile attribute byte +13 bit 4 at 0x11f554c, river +13 bit 2 at
+  0x11f4104), waterfall in front (+12 bit 1 at 0x11f5a34), break checks 0x11f8da0 / 0x11f8fd0 / 0x11f91c0, 0x878710.
+  "You can't build a cliff here because there's a building nearby!" = error 2 (CliffCreateExistStructure).
